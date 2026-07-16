@@ -68,13 +68,24 @@ class LocalExemplarMemory:
         selected_indices = []
         S = torch.zeros(d, dtype=torch.float32, device=use_device)
         mask = torch.zeros(n, dtype=torch.bool, device=use_device)
-        scores = torch.empty(n, dtype=torch.float32, device=use_device)
+        scores_f32 = torch.empty(n, dtype=torch.float32, device=use_device)
+
+        # Đường nhanh GPU: GEMV fp16 trực tiếp trên toàn ma trận (~12ms/bước với
+        # 29M hàng) — cần thiết khi m = 1% của lớp lớn (hàng trăm nghìn bước).
+        # argmax bất biến với scale dương nên chuẩn hóa target_vector về ‖·‖=1
+        # để giá trị nằm an toàn trong dải fp16.
+        use_half_gemv = use_device.type == "cuda" and feats.dtype == torch.float16
 
         for k in range(1, m + 1):
             # argmax f·(k·mean − S) tương đương argmax f·(mean − S/k) (chia k>0)
             target_vector = class_mean - S / k
-            for s0 in range(0, n, chunk):
-                scores[s0:s0 + chunk] = feats[s0:s0 + chunk].float() @ target_vector
+            if use_half_gemv:
+                t = target_vector / (target_vector.norm() + 1e-12)
+                scores = (feats @ t.half()).float()
+            else:
+                for s0 in range(0, n, chunk):
+                    scores_f32[s0:s0 + chunk] = feats[s0:s0 + chunk].float() @ target_vector
+                scores = scores_f32
             scores[mask] = -float("inf")
 
             i = int(torch.argmax(scores).item())
@@ -82,8 +93,13 @@ class LocalExemplarMemory:
             selected_indices.append(i)
             S += feats[i].float()
 
-        self.data_memory[class_id] = np.array([data[idx] for idx in selected_indices])
-        self.targets_memory[class_id] = np.array([targets[idx] for idx in selected_indices])
+        sel = np.asarray(selected_indices, dtype=np.int64)
+        if isinstance(data, np.ndarray):
+            self.data_memory[class_id] = data[sel]
+        else:
+            self.data_memory[class_id] = np.array([data[idx] for idx in sel])
+        targets_arr = np.asarray(targets)
+        self.targets_memory[class_id] = targets_arr[sel]
 
 
 class GlobalPrototypeMemory:

@@ -23,6 +23,7 @@ from utils import factory
 from utils.data_manager import DataManager, DummyDataset
 from utils.toolkit import count_parameters
 from utils.aggregation import is_aggregated_state_key, compute_aggregation_weights
+from utils.fast_loader import make_loader
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
 
@@ -123,7 +124,7 @@ def _build_local_eval_loader(data_manager, total_classes, batch_size):
         dataset = data_manager.get_dataset(indices, source="train", mode="test")
     if len(dataset) == 0:
         return None
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    return make_loader(dataset, batch_size=batch_size, shuffle=False)
 
 
 def _build_global_learned_test_loader(global_data_manager, total_classes, batch_size):
@@ -137,7 +138,7 @@ def _build_global_learned_test_loader(global_data_manager, total_classes, batch_
     dataset = global_data_manager.get_dataset(learned_classes, source="test", mode="test")
     if len(dataset) == 0:
         return None
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    return make_loader(dataset, batch_size=batch_size, shuffle=False)
 
 
 def _aggregate_client_prototypes(global_model, client_protos, num_clients, args=None, client_stats=None):
@@ -425,8 +426,8 @@ def _train_federated(args):
             )
             
             if train_dataset is not None and len(train_dataset) > 0 and has_new_data:
-                local_models[c].train_loader = torch.utils.data.DataLoader(
-                    train_dataset, batch_size=args["batch_size"], shuffle=True, num_workers=0
+                local_models[c].train_loader = make_loader(
+                    train_dataset, batch_size=args["batch_size"], shuffle=True
                 )
             else:
                 local_models[c].train_loader = None

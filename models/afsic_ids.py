@@ -9,6 +9,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from models.base import BaseLearner
+from utils.fast_loader import make_loader
 from utils.inc_net import AFSICIDSNet
 from utils.memory import LocalExemplarMemory, GlobalPrototypeMemory
 from losses import compute_kd_loss, compute_fsp_loss, compute_proto_loss, compute_sparse_regularization, compute_fedprox_regularization
@@ -53,11 +54,10 @@ class AFSIC_IDS(BaseLearner):
         test_dataset = data_manager.get_dataset(
             np.arange(0, self._total_classes), source="test", mode="test"
         )
-        self.test_loader = DataLoader(
-            test_dataset, 
-            batch_size=self.args["batch_size"], 
-            shuffle=False, 
-            num_workers=self.args.get("num_workers", 0)
+        self.test_loader = make_loader(
+            test_dataset,
+            batch_size=self.args["batch_size"],
+            shuffle=False,
         )
 
         if skip_train:
@@ -73,11 +73,10 @@ class AFSIC_IDS(BaseLearner):
             mode="train",
             appendent=self._get_memory(),
         )
-        self.train_loader = DataLoader(
-            train_dataset, 
-            batch_size=self.args["batch_size"], 
-            shuffle=True, 
-            num_workers=self.args.get("num_workers", 0)
+        self.train_loader = make_loader(
+            train_dataset,
+            batch_size=self.args["batch_size"],
+            shuffle=True,
         )
 
         if len(self._multiple_gpus) > 1:
@@ -258,7 +257,7 @@ class AFSIC_IDS(BaseLearner):
             if n == 0:
                 continue
 
-            loader = DataLoader(dset, batch_size=self.args["batch_size"], shuffle=False, num_workers=0)
+            loader = make_loader(dset, batch_size=self.args["batch_size"], shuffle=False)
             features = np.empty((n, self._network.feature_dim), dtype=np.float16)
             pos = 0
             with torch.no_grad():
@@ -318,7 +317,7 @@ class AFSIC_IDS(BaseLearner):
                 if count == 0:
                     continue
 
-            loader = DataLoader(dset, batch_size=self.args["batch_size"], shuffle=False, num_workers=0)
+            loader = make_loader(dset, batch_size=self.args["batch_size"], shuffle=False)
             feat_sum = None
             with torch.no_grad():
                 for _, inputs, _ in loader:
