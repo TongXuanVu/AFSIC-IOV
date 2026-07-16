@@ -3,6 +3,8 @@
   "dataset": "can_iov",
   "model_name": "afsic-iov",
   "convnet_type": "cnn1d",
+  "_comment_memory": "Docx AFSIC-IoV muc 5.6: |M_ic| <= m, m thuoc {5,10,20} mau/lop. memory_per_class co uu tien hon memory_ratio; ratio 1% voi lop Benign 29M mau la bat kha thi ve compute lan RAM",
+  "memory_per_class": 20,
   "memory_ratio": 0.01,
   "fixed_memory": false,
   "shuffle": false,

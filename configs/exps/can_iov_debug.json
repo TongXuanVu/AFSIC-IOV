@@ -3,6 +3,7 @@
   "dataset": "can_iov",
   "model_name": "afsic-iov",
   "convnet_type": "cnn1d",
+  "memory_per_class": 20,
   "memory_ratio": 0.01,
   "fixed_memory": false,
   "shuffle": false,

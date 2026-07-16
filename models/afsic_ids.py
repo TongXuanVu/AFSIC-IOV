@@ -241,6 +241,11 @@ class AFSIC_IDS(BaseLearner):
         return len(mem[1])
 
     def build_rehearsal_memory(self, data_manager, per_class):
+        """Trích feature dạng streaming vào ma trận float16 cấp phát sẵn rồi herding.
+
+        Tránh giữ ma trận float32 khổng lồ + spike torch.cat với lớp hàng chục
+        triệu mẫu (Benign ~29M) — nguyên nhân OOM trên Kaggle.
+        """
         self._network.eval()
         for class_idx in range(self._known_classes, self._total_classes):
             data, targets, dset = data_manager.get_dataset(
@@ -249,76 +254,92 @@ class AFSIC_IDS(BaseLearner):
                 mode="test",
                 ret_data=True,
             )
-            if len(data) == 0:
+            n = len(data)
+            if n == 0:
                 continue
-            
+
             loader = DataLoader(dset, batch_size=self.args["batch_size"], shuffle=False, num_workers=0)
-            features_list = []
-            
+            features = np.empty((n, self._network.feature_dim), dtype=np.float16)
+            pos = 0
             with torch.no_grad():
                 for _, inputs, _ in loader:
-                    inputs = inputs.to(self._device)
-                    feats = self._network.extract_vector(inputs)
-                    features_list.append(feats.cpu())
-                    
-            if features_list:
-                features_all = torch.cat(features_list, dim=0)
-                self.local_memory.construct_exemplars(class_idx, data, targets, features_all)
+                    feats = self._network.extract_vector(inputs.to(self._device))
+                    feats = F.normalize(feats, p=2, dim=1)
+                    features[pos:pos + feats.shape[0]] = feats.cpu().numpy().astype(np.float16)
+                    pos += feats.shape[0]
+
+            self.local_memory.construct_exemplars(
+                class_idx, data, targets, features,
+                features_normalized=True, device=self._device,
+            )
 
     def compute_local_prototypes(self, data_manager, class_ids=None, max_samples_per_class=None, seed=0):
+        """Tính prototype dạng streaming 1 lượt — không giữ ma trận feature trong RAM.
+
+        Tương đương chính xác với bản cũ về mặt toán học: với m = mean(feature
+        đã chuẩn hóa L2) thì prototype = m/||m|| và
+        dispersion = mean(1 − cos(f, prototype)) = 1 − ||m||.
+        """
         local_protos = {}
         self._network.eval()
-        
+
         # Compute prototypes for selected active classes.
         if class_ids is None:
             class_ids = range(self._total_classes)
 
         rng = np.random.default_rng(seed)
         for class_idx in class_ids:
-            data, targets, dset = data_manager.get_dataset(
-                np.arange(class_idx, class_idx + 1),
-                source="train",
-                mode="test",
-                ret_data=True,
-            )
-            if len(data) == 0:
-                continue
+            if max_samples_per_class is not None:
+                data, targets, dset = data_manager.get_dataset(
+                    np.arange(class_idx, class_idx + 1),
+                    source="train",
+                    mode="test",
+                    ret_data=True,
+                )
+                if len(data) == 0:
+                    continue
+                if len(data) > max_samples_per_class:
+                    selected = rng.choice(len(data), size=max_samples_per_class, replace=False)
+                    data = data[selected] if isinstance(data, np.ndarray) else [data[int(i)] for i in selected]
+                    targets = targets[selected] if isinstance(targets, np.ndarray) else [targets[int(i)] for i in selected]
+                    from utils.data_manager import DummyDataset
+                    from torchvision import transforms
+                    trsf = transforms.Compose([*data_manager._test_trsf, *data_manager._common_trsf])
+                    dset = DummyDataset(data, targets, trsf, data_manager.use_path)
+                count = len(data)
+            else:
+                # Không subsample: dùng dataset dạng view, KHÔNG copy dữ liệu lớp
+                dset = data_manager.get_dataset(
+                    np.arange(class_idx, class_idx + 1),
+                    source="train",
+                    mode="test",
+                )
+                count = len(dset)
+                if count == 0:
+                    continue
 
-            if max_samples_per_class is not None and len(data) > max_samples_per_class:
-                selected = rng.choice(len(data), size=max_samples_per_class, replace=False)
-                data = data[selected] if isinstance(data, np.ndarray) else [data[int(i)] for i in selected]
-                targets = targets[selected] if isinstance(targets, np.ndarray) else [targets[int(i)] for i in selected]
-                from utils.data_manager import DummyDataset
-                from torchvision import transforms
-                trsf = transforms.Compose([*data_manager._test_trsf, *data_manager._common_trsf])
-                dset = DummyDataset(data, targets, trsf, data_manager.use_path)
-            
             loader = DataLoader(dset, batch_size=self.args["batch_size"], shuffle=False, num_workers=0)
-            features_list = []
-            
+            feat_sum = None
             with torch.no_grad():
                 for _, inputs, _ in loader:
-                    inputs = inputs.to(self._device)
-                    feats = self._network.extract_vector(inputs)
-                    feats_norm = F.normalize(feats, p=2, dim=1)
-                    features_list.append(feats_norm.cpu())
-            
-            if features_list:
-                features_all = torch.cat(features_list, dim=0)
-                prototype = torch.mean(features_all, dim=0)
-                prototype = prototype / (torch.norm(prototype, p=2) + 1e-8)
-                
-                proto_np = prototype.numpy()
-                feats_np = features_all.numpy()
-                cos_sims = np.dot(feats_np, proto_np)
-                cos_dists = 1.0 - cos_sims
-                dispersion = float(np.mean(cos_dists))
-                
-                local_protos[class_idx] = {
-                    "prototype": prototype,
-                    "count": len(data),
-                    "dispersion": dispersion
-                }
+                    feats = self._network.extract_vector(inputs.to(self._device))
+                    feats = F.normalize(feats, p=2, dim=1)
+                    part = feats.sum(dim=0).double().cpu()
+                    feat_sum = part if feat_sum is None else feat_sum + part
+
+            if feat_sum is None:
+                continue
+
+            mean_vec = feat_sum / count
+            mean_norm = float(torch.norm(mean_vec, p=2))
+            prototype = (mean_vec / (mean_norm + 1e-8)).float()
+            dispersion = max(0.0, 1.0 - mean_norm)
+
+            local_protos[class_idx] = {
+                "prototype": prototype,
+                "count": count,
+                "dispersion": dispersion
+            }
         return local_protos
 
 

@@ -37,3 +37,4 @@ no-use/
 *.png
 !docs/figures/*.png
 .ipynb_checkpoints/
+data.zip
