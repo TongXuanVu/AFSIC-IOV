@@ -90,24 +90,40 @@ class AFSIC_IDS(BaseLearner):
 
     def _train(self, train_loader, test_loader):
         self._network.to(self._device)
-        
+
         # Optimize only trainable incremental parameters during incremental stages
         if self._cur_task > 0:
             params = self._network.get_trainable_incremental_params()
         else:
             params = self._network.parameters()
-            
+
+        # LR decay theo ROUND liên bang: optimizer/scheduler bị tạo lại mỗi round
+        # nên MultiStepLR trong-round không bao giờ chạm milestones (local_epochs=1
+        # → lr đứng nguyên suốt run, gây dao động acc giữa các round cuối).
+        # Trainer set args["current_round"]; lr hiệu dụng = lr · gamma^(số
+        # milestone đã vượt qua). Khi đó milestones trong-round bị vô hiệu để
+        # không decay hai lần.
+        lr = self.args.get("lr", 0.001)
+        gamma = self.args.get("gamma", 0.1)
+        milestones = list(self.args.get("milestones", [80, 120, 150]))
+        current_round = self.args.get("current_round", None)
+        if current_round is not None:
+            lr = lr * (gamma ** sum(1 for m in milestones if current_round >= m))
+            epoch_milestones = []
+        else:
+            epoch_milestones = milestones
+
         optimizer = optim.Adam(
             filter(lambda p: p.requires_grad, params),
-            lr=self.args.get("lr", 0.001),
+            lr=lr,
             weight_decay=self.args.get("weight_decay", 0.0002),
         )
         scheduler = optim.lr_scheduler.MultiStepLR(
-            optimizer, 
-            milestones=self.args.get("milestones", [80, 120, 150]), 
-            gamma=self.args.get("gamma", 0.1)
+            optimizer,
+            milestones=epoch_milestones,
+            gamma=gamma
         )
-        
+
         self._init_train(train_loader, test_loader, optimizer, scheduler)
 
     def _init_train(self, train_loader, test_loader, optimizer, scheduler):

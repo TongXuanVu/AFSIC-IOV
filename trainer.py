@@ -498,7 +498,15 @@ def _train_federated(args):
 
         for round_idx in range(current_start_round, args["num_rounds"]):
             global_round = task * args["num_rounds"] + round_idx
-            logging.info(f"--- Task {task} | Round {round_idx+1}/{args['num_rounds']} (Global {global_round+1}) ---")
+            # LR decay theo round: client đọc current_round trong _train
+            args["current_round"] = round_idx
+            _lr_eff = args.get("lr", 0.001) * (
+                args.get("gamma", 0.1) ** sum(1 for m in args.get("milestones", []) if round_idx >= m)
+            )
+            logging.info(
+                f"--- Task {task} | Round {round_idx+1}/{args['num_rounds']} "
+                f"(Global {global_round+1}) | lr={_lr_eff:g} ---"
+            )
             client_weights = []
             client_accs = []
             client_protos = []
