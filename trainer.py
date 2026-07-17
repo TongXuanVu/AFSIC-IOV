@@ -663,8 +663,8 @@ def _train_federated(args):
             logging.info(
                 f"[Task {task} | Round {round_idx+1}] "
                 f"Acc: {cnn_accy['top1']:.2f}% | "
-                f"Old Acc: {cnn_accy.get('old_acc', 0):.2f}% | "
-                f"New Acc: {cnn_accy.get('new_acc', 0):.2f}% | "
+                f"Old Acc: {cnn_accy.get('grouped', {}).get('old_acc', 0):.2f}% | "
+                f"New Acc: {cnn_accy.get('grouped', {}).get('new_acc', 0):.2f}% | "
                 f"Forgetting: {mean_forgetting:.2f}% | "
                 f"Params: {total_params:,} | Comm Cost: {comm_cost:.2f} MB"
             )
