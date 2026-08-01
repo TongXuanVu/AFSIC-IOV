@@ -450,6 +450,7 @@ def _train_federated(args):
                 old_protos = local_models[c].compute_local_prototypes(
                     client_dms[c],
                     class_ids=range(local_models[c]._known_classes),
+                    max_samples_per_class=args.get("proto_max_samples"),
                     seed=args.get("seed", 0) + c,
                 )
                 max_samples = args.get("kshot", 10) if args.get("fewshot_enabled", True) else None
@@ -547,9 +548,17 @@ def _train_federated(args):
                         client_accs.append(0.0)
                     
                     # Compute local prototypes
+                    # proto_max_samples: giới hạn số mẫu mỗi lớp CŨ khi tính
+                    # prototype. Prototype là trung bình của feature đã chuẩn
+                    # hóa L2 nên n=20.000 đã cho sai số lấy mẫu ~0,7%; trong
+                    # khi để None thì mỗi round phải duyệt toàn bộ dữ liệu lớp
+                    # cũ (client 0 có 29,2 triệu mẫu Benign = 3.565 batch),
+                    # chiếm ~83% thời gian một round. Mặc định None = giữ
+                    # nguyên hành vi cũ.
                     old_protos = local_models[c].compute_local_prototypes(
                         client_dms[c],
                         class_ids=range(local_models[c]._known_classes),
+                        max_samples_per_class=args.get("proto_max_samples"),
                         seed=args.get("seed", 0) + c,
                     )
                     new_protos = local_models[c].compute_local_prototypes(
