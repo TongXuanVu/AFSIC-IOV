@@ -313,8 +313,12 @@ class AFSIC_IDS(BaseLearner):
                 )
                 if len(data) == 0:
                     continue
-                if len(data) > max_samples_per_class:
-                    selected = rng.choice(len(data), size=max_samples_per_class, replace=False)
+                # max_samples_per_class < 1 => hiểu là TỈ LỆ (kịch bản 1%);
+                # >= 1 => số mẫu tuyệt đối (10-shot, proto_max_samples).
+                _cap = float(max_samples_per_class)
+                _cap = max(1, int(round(_cap * len(data)))) if _cap < 1.0 else int(_cap)
+                if len(data) > _cap:
+                    selected = rng.choice(len(data), size=_cap, replace=False)
                     data = data[selected] if isinstance(data, np.ndarray) else [data[int(i)] for i in selected]
                     targets = targets[selected] if isinstance(targets, np.ndarray) else [targets[int(i)] for i in selected]
                     from utils.data_manager import DummyDataset

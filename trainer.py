@@ -63,6 +63,26 @@ def _take_items(values, indices):
     return [values[int(i)] for i in indices]
 
 
+def _resolve_kshot(kshot, n_total):
+    """Quy đổi kshot ra số mẫu cụ thể.
+
+        kshot >= 1  -> số mẫu tuyệt đối (10-shot: kshot=10)
+        0 < kshot < 1 -> TỈ LỆ trên số mẫu sẵn có (1%: kshot=0.01)
+        None / <= 0 -> không giới hạn
+
+    Cho phép biểu diễn kịch bản "1%" mà không cần thêm tham số mới, đồng thời
+    giữ nguyên ngữ nghĩa cũ cho mọi config đang dùng kshot nguyên.
+    """
+    if kshot is None:
+        return None
+    k = float(kshot)
+    if k <= 0:
+        return None
+    if k < 1.0:
+        return max(1, int(round(k * n_total)))
+    return int(k)
+
+
 def _build_fewshot_train_dataset(data_manager, local_model, args, task, client_id):
     """Build few-shot new-class data plus local exemplar replay."""
     kshot = args.get("kshot", None) if args.get("fewshot_enabled", True) else None
@@ -79,12 +99,13 @@ def _build_fewshot_train_dataset(data_manager, local_model, args, task, client_i
         )
         if len(data) == 0:
             continue
-        if kshot is None:
+        k_resolved = _resolve_kshot(kshot, len(data))
+        if k_resolved is None:
             keep = len(data)
             data_parts.append(data)
             target_parts.append(targets)
         else:
-            keep = min(int(kshot), len(data))
+            keep = min(k_resolved, len(data))
             selected = rng.choice(len(data), size=keep, replace=False)
             data_parts.append(_take_items(data, selected))
             target_parts.append(_take_items(targets, selected))
