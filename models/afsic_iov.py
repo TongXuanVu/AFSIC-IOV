@@ -20,6 +20,8 @@ Config liên quan:
     proto_rho          (float, mặc định 0.5) — ρ cố định khi không thích ứng
     proto_rho_m        (float, mặc định 20)  — hằng số bão hòa n/(n+m)
 """
+import math
+
 import torch
 
 from models.afsic_ids import AFSIC_IDS
@@ -40,11 +42,48 @@ class AFSIC_IoV(AFSIC_IDS):
         return protos
 
     def _personalization_rho(self, class_id):
-        if not self.args.get("proto_rho_adaptive", True):
+        """Trọng số trộn giữa prototype cục bộ và prototype toàn cục.
+
+        Chế độ chọn qua config "proto_rho_mode":
+
+            "share"  — ρ = n_{i,c} / n_c(toàn cục). Tỉ lệ dữ liệu lớp c mà
+                       client i nắm giữ. Không cần siêu tham số, đúng thang đo
+                       ở mọi kích cỡ lớp. KHUYẾN NGHỊ.
+            "log"    — ρ = log(1+n) / (log(1+n) + m), với m ≈ 5–10.
+                       Giữ dạng bão hòa nhưng nén được nhiều bậc độ lớn.
+            "linear" — ρ = n/(n+m). Hành vi gốc; CHỈ đúng khi n cùng bậc với m.
+            "fixed"  — ρ = proto_rho, không phụ thuộc dữ liệu.
+
+        Vì sao bỏ mặc định "linear" với m=20: dữ liệu CAN-IoV trải từ 10 tới
+        29 triệu mẫu (6,5 bậc độ lớn), trong khi n/(n+m) chỉ có vùng chuyển
+        tiếp rộng khoảng 2 bậc quanh m. Với m=20, MỌI lớp thật đều cho ρ≈1
+        (Benign 29.190.414 mẫu → 1.0000; speed-accessory 687 mẫu → 0.9717),
+        nên thành phần toàn cục bị triệt tiêu và cơ chế mất hoàn toàn khả năng
+        phân biệt: client giữ 3,8% dữ liệu và client giữ 30% nhận cùng ρ.
+        """
+        mode = self.args.get("proto_rho_mode", "linear")
+
+        if mode == "fixed" or not self.args.get("proto_rho_adaptive", True):
             return float(self.args.get("proto_rho", 0.5))
+
         n = int(self.local_protos.get(class_id, {}).get("count", 0))
         if n <= 0:
             return 0.0
+
+        if mode == "share":
+            info = self.global_proto_memory.get(class_id)
+            n_total = int(info.get("count", 0)) if info else 0
+            # Vòng đầu của một task, server chưa tổng hợp count cho lớp mới →
+            # chưa có cơ sở so sánh, tạm dựa hẳn vào tri thức toàn cục.
+            if n_total <= 0:
+                return 0.0
+            return min(1.0, n / float(n_total))
+
+        if mode == "log":
+            m = float(self.args.get("proto_rho_m", 10.0))
+            log_n = math.log1p(n)
+            return log_n / (log_n + m)
+
         m = float(self.args.get("proto_rho_m", 20.0))
         return n / (n + m)
 
