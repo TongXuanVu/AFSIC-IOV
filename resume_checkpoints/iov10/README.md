@@ -39,11 +39,26 @@ Thấy loss ~3.3 thay vì ~1.6 ở round 1 task 1 là đã dính lỗi.
 
 ## File trong thư mục
 
+### Dùng chung (task 0)
+
 | File | Dùng để |
 |---|---|
-| `ckpt_round0030_task00_r030_acc100.0.pth` | **điểm resume chuẩn** (hết task 0) |
-| `ckpt_task00_memory_client09.pth` | chỉ để tham khảo memory đã build; KHÔNG resume từ đây |
+| `ckpt_round0030_task00_r030_acc100.0.pth` | **điểm khởi đầu** cho mọi kịch bản (hết task 0) |
+| `ckpt_task00_memory_client09.pth` | chỉ tham khảo memory đã build; KHÔNG resume từ đây |
 | `metrics_r1-30.csv` | số liệu task 0 (acc 99.96 / macro-F1 72.75) |
+
+### Theo kịch bản
+
+| Thư mục | Checkpoint | Tiến độ | macro-F1 task 1 |
+|---|---|---|---|
+| `10shot/` | `ckpt_round0053_task01_r023_acc1.2.pth` | task 1 round 23/30 | 24.33 |
+| `1pct/` | `ckpt_round0044_task01_r014_acc97.5.pth` | task 1 round 14/30 | **50.72** |
+
+Ngưỡng sụp task 1 = 16.61, nên cả hai đều đang học thật. Kịch bản 1% giữ được
+accuracy 97.5% trong khi 10-shot mất Benign (accuracy 1.24%).
+
+Cả hai checkpoint đều tạo sau commit `5bcc567` nên **có trường `net`** (74 MB thay vì
+72 MB). Khi resume phải thấy dòng `Đã phục hồi trọng số riêng cho 10/10 client`.
 
 ## Đã gỡ (2026-08-02)
 
