@@ -415,12 +415,29 @@ def _train_federated(args):
             global_model._network.load_state_dict(checkpoint['model_state_dict'])
             if _is_afsic(args) and checkpoint.get('global_proto_memory') is not None:
                 global_model.global_proto_memory = checkpoint['global_proto_memory']
+            _restored_net = 0
             for c in range(args["num_clients"]):
                 c_state = checkpoint['client_states'][c]
                 local_models[c]._data_memory = c_state.get('data_memory')
                 local_models[c]._targets_memory = c_state.get('targets_memory')
                 if _is_afsic(args) and c_state.get('local_memory') is not None:
                     local_models[c].local_memory = c_state['local_memory']
+                # Phục hồi nhánh cá nhân hóa của client (xem chú thích ở chỗ lưu).
+                if c_state.get('net') is not None:
+                    try:
+                        local_models[c]._network.load_state_dict(c_state['net'], strict=False)
+                        local_models[c]._network.to(args["device"][0])
+                        _restored_net += 1
+                    except Exception as e:
+                        logging.warning(f"Không nạp được trọng số client {c}: {e}")
+            if _restored_net:
+                logging.info(f"Đã phục hồi trọng số riêng cho {_restored_net}/{args['num_clients']} client.")
+            else:
+                logging.warning(
+                    "CHECKPOINT CŨ — không có trọng số client. Nhánh cá nhân hóa "
+                    "(stability_encoder/adapter/gate) sẽ là khởi tạo ngẫu nhiên. "
+                    "Chỉ nên resume từ checkpoint task 0 (ckpt_round0030)."
+                )
 
         for c in range(args["num_clients"]):
             if _is_afsic(args) and task > 0:
@@ -784,6 +801,13 @@ def _train_federated(args):
                     'data_memory': getattr(local_models[c], '_data_memory', None),
                     'targets_memory': getattr(local_models[c], '_targets_memory', None),
                     'local_memory': getattr(local_models[c], 'local_memory', None),
+                    # Trọng số mạng riêng của client. Bắt buộc phải lưu: nhánh
+                    # cá nhân hóa (stability_encoder / plasticity_adapter / gate)
+                    # nằm trong _PERSONALIZED_KEY_MARKERS nên KHÔNG bao giờ được
+                    # nạp đè từ global ở task >= 1. Thiếu nó, resume giữa chừng
+                    # sẽ để client chạy tiếp với nhánh cá nhân hóa khởi tạo
+                    # ngẫu nhiên (loss round 1 task 1 nhảy 1.6 -> 3.3).
+                    'net': {k: v.cpu() for k, v in local_models[c]._network.state_dict().items()},
                 })
             ckpt_name = f'ckpt_round{global_round+1:04d}_task{task:02d}_r{round_idx+1:03d}_acc{cnn_accy["top1"]:.1f}.pth'
             torch.save({
@@ -818,6 +842,7 @@ def _train_federated(args):
                         'data_memory': getattr(local_models[state_c], '_data_memory', None),
                         'targets_memory': getattr(local_models[state_c], '_targets_memory', None),
                         'local_memory': getattr(local_models[state_c], 'local_memory', None),
+                        'net': {k: v.cpu() for k, v in local_models[state_c]._network.state_dict().items()},
                     })
                     
                 ckpt_name = f'ckpt_task{task:02d}_memory_client{c:02d}.pth'
