@@ -49,16 +49,19 @@ Thấy loss ~3.3 thay vì ~1.6 ở round 1 task 1 là đã dính lỗi.
 
 ### Theo kịch bản
 
-| Thư mục | Checkpoint | Tiến độ | macro-F1 task 1 |
+| Thư mục | Checkpoint mới nhất | Tiến độ | macro-F1 task 1 |
 |---|---|---|---|
-| `10shot/` | `ckpt_round0053_task01_r023_acc1.2.pth` | task 1 round 23/30 | 24.33 |
-| `1pct/` | `ckpt_round0044_task01_r014_acc97.5.pth` | task 1 round 14/30 | **50.72** |
+| `full/` | `ckpt_round0046_task01_r016_acc99.2.pth` | task 1 r16/30 | **46.16** |
+| `1pct/` | `ckpt_round0082_task02_r022_acc97.7.pth` | task 2 r22/30 | 39.97 |
+| `10shot/` | `ckpt_round0087_task02_r027_acc96.6.pth` | task 2 r27/30 | 24.33 |
 
-Ngưỡng sụp task 1 = 16.61, nên cả hai đều đang học thật. Kịch bản 1% giữ được
-accuracy 97.5% trong khi 10-shot mất Benign (accuracy 1.24%).
+Ngưỡng sụp: task 1 = 16.61, task 2 = 11.07. Cả ba đều trên ngưỡng.
 
-Cả hai checkpoint đều tạo sau commit `5bcc567` nên **có trường `net`** (74 MB thay vì
-72 MB). Khi resume phải thấy dòng `Đã phục hồi trọng số riêng cho 10/10 client`.
+Thứ tự ở task 1: **full > 1% > 10-shot** — càng nhiều mẫu lớp mới thì càng tốt.
+Full và 1% giữ được accuracy 97–99% (không quên Benign); 10-shot mất Benign (acc 1.25).
+
+Mọi checkpoint ở đây đều tạo sau commit `5bcc567` nên **có trường `net`** (75–78 MB
+thay vì 72 MB). Khi resume phải thấy `Đã phục hồi trọng số riêng cho 10/10 client`.
 
 ## Đã gỡ (2026-08-02)
 
