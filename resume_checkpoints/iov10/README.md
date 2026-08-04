@@ -51,25 +51,28 @@ Thấy loss ~3.3 thay vì ~1.6 ở round 1 task 1 là đã dính lỗi.
 
 | Thư mục | Checkpoint mới nhất | Tiến độ |
 |---|---|---|
-| `full/` | `ckpt_round0083_task02_r023_acc90.8.pth` | task 2 r23/30 (83/150) |
-| `1pct/` | `ckpt_round0101_task03_r011_acc97.0.pth` | task 3 r11/30 (101/150) |
-| `10shot/` | `ckpt_round0103_task03_r013_acc17.9.pth` | task 3 r13/30 (103/150) |
+| `full/` | `ckpt_round0102_task03_r012_acc87.1.pth` | task 3 r12/30 (102/150) |
+| `1pct/` | `ckpt_round0118_task03_r028_acc0.0.pth` | task 3 r28/30 (118/150) |
+| `10shot/` | `ckpt_round0119_task03_r029_acc0.4.pth` | task 3 r29/30 (119/150) |
 
-Kết quả tới thời điểm này (round mới nhất của mỗi task):
+Kết quả (round mới nhất của mỗi task):
 
-| Task | ACC full / 1% / 10shot | macro-F1 full / 1% / 10shot | ngưỡng sụp F1 |
-|---|---|---|---|
-| 0 | 99.96 / — / — | **72.75** / — / — | 33.27 |
-| 1 | 93.77 / 81.83 / 1.29 | 44.57 / 39.24 / 24.07 | 16.61 |
-| 2 | 90.82 / 97.72 / 96.38 | 10.63 / 14.44 / **23.82** | 11.07 |
-| 3 | — / 97.01 / 17.85 | — / 9.17 / 4.02 | 9.06 |
+| Task | macro-F1 full / 1% / 10shot | ngưỡng sụp |
+|---|---|---|
+| 0 | **72.75** / — / — | 33.27 |
+| 1 | 44.57 / 39.24 / 24.07 | 16.61 |
+| 2 | 10.61 / 14.44 / 23.82 | 11.07 |
+| 3 | 10.04 / **0.07** / 9.53 | 9.06 |
 
 **Đọc bằng macro-F1, không phải accuracy.** Tập test lệch 18.500:1 (Benign 99,2%)
-nên một mô hình chỉ đoán Benign vẫn đạt accuracy 97–99%. Ví dụ 1% ở task 2 có
-accuracy 97,72 nhưng macro-F1 14,44 — chỉ nhỉnh hơn ngưỡng sụp 11,07; còn 10-shot ở
-task 1 có accuracy 1,29 nhưng macro-F1 24,07, tức thực sự phân biệt được các lớp.
+nên mô hình chỉ đoán Benign vẫn đạt accuracy 97–99%. Ngược lại 10-shot ở task 1 có
+accuracy 1,29 nhưng macro-F1 24,07 — thực sự phân biệt được các lớp.
 
-Mọi checkpoint ở đây tạo sau commit `5bcc567` nên **có trường `net`** (78–85 MB).
+Xu hướng: cả ba kịch bản suy giảm về quanh ngưỡng sụp từ task 2, và task 3 thì hoặc
+bám ngưỡng (full 10.04, 10-shot 9.53) hoặc sụp hẳn (1% còn 0.07, dồn dự đoán vào một
+lớp hiếm — tệ hơn cả việc chỉ đoán Benign).
+
+Mọi checkpoint ở đây tạo sau commit `5bcc567` nên **có trường `net`** (85 MB).
 Khi resume phải thấy `Đã phục hồi trọng số riêng cho 10/10 client`.
 
 ## Đã gỡ (2026-08-02)
