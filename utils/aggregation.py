@@ -45,7 +45,55 @@ def compute_aggregation_weights(
     # khiến client chỉ có 4.414 mẫu (0,004% dữ liệu) vẫn chiếm 14,3% mô hình
     # toàn cục — khuếch đại 3.190 lần so với tỉ trọng thật.
     beta_n = args.get("beta_n", 0.0)
-    
+
+    # ── Drift vs UpdateNorm ──────────────────────────────────────────────────
+    # Đặc tả mục 5.7 mô tả beta_4·Drift và beta_5·UpdateNorm là HAI tiêu chí
+    # độc lập. Bản gốc lại cộng dồn cả hai bằng đúng một biểu thức nên
+    # drift_i == update_norm_i luôn luôn — thực chất chỉ là một đại lượng bị
+    # trừ hai lần với hệ số (beta_4 + beta_5).
+    #
+    #   drift_mode = "vs_global" (mặc định)  → giữ nguyên hành vi cũ
+    #   drift_mode = "vs_mean"               → tách đúng ngữ nghĩa:
+    #        UpdateNorm_i = ||theta_i - theta_global||   (độ lớn update của client)
+    #        Drift_i      = ||theta_i - mean_j(theta_j)|| (lệch khỏi xu hướng chung)
+    #
+    # Chế độ "vs_mean" cần biết trung bình update của mọi client nên phải tính
+    # trước vòng lặp chính.
+    drift_mode = args.get("drift_mode", "vs_global")
+    agg_bb = args.get("aggregate_backbone", False)
+
+    diff_cache = {}          # c_idx -> {key: tensor diff}
+    update_norm_cache = {}   # c_idx -> float
+    for c_idx, _c in enumerate(active_client_indices):
+        local_dict = client_weights[c_idx]
+        diffs, sq, n_par = {}, 0.0, 0
+        for k in local_dict.keys():
+            if is_aggregated_state_key(k, task, agg_bb):
+                d = local_dict[k].float() - global_state_round_start[k].float()
+                diffs[k] = d
+                sq += torch.sum(d ** 2).item()
+                n_par += d.numel()
+        diff_cache[c_idx] = diffs
+        update_norm_cache[c_idx] = (np.sqrt(sq / max(1, n_par)), n_par)
+
+    drift_cache = {}
+    if drift_mode == "vs_mean" and len(active_client_indices) > 1:
+        keys = set().union(*(set(d) for d in diff_cache.values())) if diff_cache else set()
+        mean_diff = {k: torch.stack([diff_cache[i][k] for i in diff_cache if k in diff_cache[i]]).mean(0)
+                     for k in keys}
+        for c_idx in diff_cache:
+            sq, n_par = 0.0, 0
+            for k, d in diff_cache[c_idx].items():
+                dev = d - mean_diff[k]
+                sq += torch.sum(dev ** 2).item()
+                n_par += dev.numel()
+            drift_cache[c_idx] = np.sqrt(sq / max(1, n_par))
+    else:
+        for c_idx in diff_cache:
+            drift_cache[c_idx] = update_norm_cache[c_idx][0]
+
+    diff_cache.clear()   # giải phóng bộ nhớ
+
     for c_idx, c in enumerate(active_client_indices):
         acc_i = client_accs[c]
         
@@ -79,20 +127,9 @@ def compute_aggregation_weights(
                     novelty_vals.append(min_dist)
         novelty_i = sum(novelty_vals) / len(novelty_vals) if novelty_vals else 0.5
         
-        # Drift and Update Norm
-        drift_val = 0.0
-        update_val = 0.0
-        num_params = 0
-        local_dict = client_weights[c_idx]
-        for k in local_dict.keys():
-            if is_aggregated_state_key(k, task, args.get("aggregate_backbone", False)):
-                diff = local_dict[k].float() - global_state_round_start[k].float()
-                drift_val += torch.sum(diff ** 2).item()
-                update_val += torch.sum(diff ** 2).item()
-                num_params += diff.numel()
-        
-        drift_i = np.sqrt(drift_val / max(1, num_params))
-        update_norm_i = np.sqrt(update_val / max(1, num_params))
+        # Drift và UpdateNorm — đã tính sẵn ở hai lượt phía trên
+        update_norm_i = update_norm_cache[c_idx][0]
+        drift_i = drift_cache[c_idx]
         
         # Số mẫu client dùng ở vòng này, lấy từ 'count' của prototype từng lớp
         # (đã có sẵn, không cần đổi chữ ký hàm).

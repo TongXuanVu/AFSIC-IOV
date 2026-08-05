@@ -3,6 +3,7 @@ import logging
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
 from convs.linears import CosineLinear
 
 def get_convnet(args, pretrained=False):
@@ -61,6 +62,17 @@ class AFSICIDSNet(nn.Module):
             
             g = self.gate(phi_x, a_x)
             z = g * phi_x + (1.0 - g) * a_x
+            # Đặc tả mục 5.3:  z = Norm( g (*) h_s + (1-g) (*) h_a )
+            #
+            # Bản gốc bỏ bước Norm. Thực tế ảnh hưởng nhỏ vì mọi nơi dùng z đều
+            # tự chuẩn hoá (CosineLinear.forward, compute_fsp_loss,
+            # compute_proto_loss, compute_local_prototypes), nhưng để khớp đặc
+            # tả thì bật gated_fusion_norm.
+            #
+            # CẢNH BÁO: bật cờ này đổi biểu diễn đặc trưng nên MỌI checkpoint
+            # hiện có trở nên không tương thích — phải chạy lại từ task 0.
+            if self.args.get("gated_fusion_norm", False):
+                z = F.normalize(z, p=2, dim=1)
             return z
 
     def forward(self, x):

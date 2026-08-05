@@ -189,7 +189,10 @@ class AFSIC_IDS(BaseLearner):
                 loss_fsp = compute_fsp_loss(features, targets, proto_matrix, T_fsp=0.5)
                 
                 # d. Prototype Alignment Loss
-                loss_proto = compute_proto_loss(features, targets, proto_matrix)
+                loss_proto = compute_proto_loss(
+                    features, targets, proto_matrix,
+                    normalize=self.args.get("proto_loss_normalize", True),
+                )
                 
                 # e. Sparse Regularization Loss (L1 norm on adapter and gate parameters)
                 loss_rs = torch.tensor(0.0).to(self._device)
