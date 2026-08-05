@@ -33,18 +33,30 @@ def compute_aggregation_weights(
     beta_novelty = args.get("beta_novelty", 0.5)
     beta_drift = args.get("beta_drift", 0.5)
     beta_update = args.get("beta_update", 0.2)
-    # beta_n: trọng số theo QUY MÔ DỮ LIỆU của client. Mặc định 0.0 nên không đổi
-    # hành vi của mọi config cũ.
+    # beta_n: trọng số theo QUY MÔ DỮ LIỆU của client. Mặc định 0.0 nên không
+    # đổi hành vi của mọi config cũ.
     #
-    # Vì alpha = softmax(Q/tau) và softmax(log n) = n_k / sum(n), nên đặt
-    # beta_n=1 cùng với mọi beta khác = 0 và tau=1 sẽ cho đúng FedAvg chuẩn.
-    #
-    # Cần thiết vì Q_i hiện chỉ gồm accuracy, độ nhất quán prototype, độ mới,
+    # VÌ SAO CẦN: Q_i gốc chỉ gồm accuracy, độ nhất quán prototype, độ mới,
     # drift và update-norm — KHÔNG có thành phần nào theo n_k. Với dữ liệu IoV
     # 10 client (3 client nắm 89,8% dữ liệu), softmax cho alpha gần đều nhau,
     # khiến client chỉ có 4.414 mẫu (0,004% dữ liệu) vẫn chiếm 14,3% mô hình
-    # toàn cục — khuếch đại 3.190 lần so với tỉ trọng thật.
+    # toàn cục — khuếch đại 3.190 lần so với tỉ trọng thật. Đặc tả mục 5.7 có
+    # beta_1*log(1+n) trong r_{i,c}, nhưng Q_i thì thiếu.
+    #
+    # size_term_mode quyết định cách đưa quy mô vào Q_i:
+    #
+    #   "norm" (khuyến nghị) — chuẩn hoá log(1+n_i) về [0,1] theo min–max giữa
+    #       các client active, rồi nhân beta_n. GIỮ ĐƯỢC các cơ chế
+    #       reliability-aware, vì mọi số hạng cùng thang [0,1].
+    #
+    #   "raw" — cộng thẳng beta_n*log(1+n_i). CẢNH BÁO: log(1+n) đạt 17,19 với
+    #       client 29 triệu mẫu, trong khi acc và proto_cons chỉ trong [0,1],
+    #       nên số hạng này áp đảo hoàn toàn và Q_i thực chất chỉ còn phụ thuộc
+    #       n. Với beta_n=1 + mọi beta khác=0 + tau=1 thì cho đúng FedAvg chuẩn
+    #       (softmax(log n) = n_k/sum(n)) — dùng để dựng BASELINE FedAvg, KHÔNG
+    #       phải để "sửa" AFSIC-IoV.
     beta_n = args.get("beta_n", 0.0)
+    size_term_mode = args.get("size_term_mode", "norm")
 
     # ── Drift vs UpdateNorm ──────────────────────────────────────────────────
     # Đặc tả mục 5.7 mô tả beta_4·Drift và beta_5·UpdateNorm là HAI tiêu chí
@@ -94,6 +106,17 @@ def compute_aggregation_weights(
 
     diff_cache.clear()   # giải phóng bộ nhớ
 
+    # Số mẫu mỗi client (từ 'count' của prototype từng lớp) và số hạng quy mô.
+    n_cache = {c: sum(int(info.get("count", 0)) for info in client_protos[c].values())
+               for c in active_client_indices}
+    log_n = {c: float(np.log1p(max(n_cache[c], 0))) for c in active_client_indices}
+    if size_term_mode == "norm":
+        lo, hi = min(log_n.values()), max(log_n.values())
+        size_cache = {c: (log_n[c] - lo) / (hi - lo) if hi > lo else 0.0
+                      for c in active_client_indices}
+    else:                       # "raw"
+        size_cache = dict(log_n)
+
     for c_idx, c in enumerate(active_client_indices):
         acc_i = client_accs[c]
         
@@ -131,10 +154,8 @@ def compute_aggregation_weights(
         update_norm_i = update_norm_cache[c_idx][0]
         drift_i = drift_cache[c_idx]
         
-        # Số mẫu client dùng ở vòng này, lấy từ 'count' của prototype từng lớp
-        # (đã có sẵn, không cần đổi chữ ký hàm).
-        n_i = sum(int(info.get("count", 0)) for info in client_protos[c].values())
-        size_term = beta_n * float(np.log1p(max(n_i, 0)))
+        n_i = n_cache[c]
+        size_term = beta_n * size_cache[c]
 
         Q_i = size_term + beta_acc * acc_i + beta_proto * proto_cons_i + beta_novelty * novelty_i - beta_drift * drift_i - beta_update * update_norm_i
         Q_list.append(Q_i)

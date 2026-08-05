@@ -48,7 +48,7 @@ không cứu được, nên phép thử sẽ cho âm tính bất kể giả thuy
 
 | | |
 |---|---|
-| Config | `can_iov_fewshot1_fedavgw.json` |
+| Config | `can_iov_fewshot1_sizeaware.json` |
 | Checkpoint | `ckpt_round0090_task02_r030_acc97.7.pth` |
 | Chi phí | 30 round × ~21 phút ≈ **10,5 giờ** (một session) |
 | Tiêu chí | macro-F1 cuối task 3 **> 11** (ngưỡng sụp 9,06 + biên) |
@@ -116,7 +116,7 @@ liệu của một mô hình đã hỏng. Chỉ làm nếu anh cần điền đ�
 %cd /kaggle/working/AFSIC-IOV
 !ls resume_checkpoints/iov10/*/
 
-!python main.py --config configs/exps/can_iov_fewshot1_fedavgw.json \
+!python main.py --config configs/exps/can_iov_fewshot1_sizeaware.json \
     --resume resume_checkpoints/iov10/thunghiem/ckpt_round0090_task02_r030_acc97.7.pth
 ```
 
@@ -164,3 +164,36 @@ Và `Drift` phải **khác** `UpdateNorm` (bản gốc chúng bằng nhau tới 
 - Resume từ điểm mô hình **còn lành**, không từ điểm đã hỏng.
 - Luôn đối chiếu macro-F1 với **ngưỡng sụp**, không nhìn accuracy.
 - Không kết luận dưới 5 round.
+
+---
+
+## 7. Vì sao KHÔNG tắt các cơ chế reliability-aware
+
+Bản đầu của kế hoạch này đặt `beta_acc = beta_proto = beta_novelty = 0` để "cô lập"
+thành phần quy mô dữ liệu. Đó là **sai**: làm vậy là vứt bỏ toàn bộ cơ chế
+reliability-aware — tức đóng góp chính của AFSIC-IoV — và biến phương pháp thành
+FedAvg thuần. Phép thử khi đó không kiểm chứng được gì.
+
+Còn một vấn đề kỹ thuật nữa: `log(1+n)` đạt **17,19** với client 29 triệu mẫu, trong
+khi `acc` và `proto_cons` chỉ nằm trong [0,1]. Cộng thẳng vào thì số hạng quy mô áp đảo
+hoàn toàn, và kết quả vẫn là FedAvg trá hình dù các beta khác khác 0.
+
+Nên `size_term_mode` có hai chế độ:
+
+| Chế độ | Quy mô chiếm bao nhiêu biên độ `Q` | α thu được |
+|---|---|---|
+| `raw` | **92,9%** | 0.308 / 0.330 / 0.270 / 0.055 / 0.036 / 0.001 / 0.000 / 0.000 |
+| `norm` | **59,6%** | 0.190 / 0.203 / 0.166 / 0.138 / 0.138 / 0.083 / 0.043 / 0.038 |
+| gốc (không có) | 0% | 0.150 / 0.160 / 0.130 / 0.130 / 0.136 / 0.126 / 0.087 / 0.081 |
+| *tỉ trọng dữ liệu thật* | | *0.299 / 0.300 / 0.300 / 0.062 / 0.038 / 0.001 / 0.000 / 0.000* |
+
+Chế độ `raw` cho α gần trùng tỉ trọng dữ liệu thật — đúng FedAvg, nên dùng để dựng
+**baseline** (`can_iov_baseline_fedavg.json`), không phải để sửa AFSIC-IoV.
+
+Chế độ `norm` chuẩn hoá `log(1+n)` về [0,1] theo min–max giữa các client active, nên
+quy mô chỉ là **một trong bốn** số hạng. Client lớn được kéo từ 0,150 lên 0,190; client
+4.414 mẫu bị kéo từ 0,081 xuống 0,038 — vẫn nhiều hơn tỉ trọng thật (0,000) nhưng
+không còn khuếch đại 3.190 lần. Các cơ chế accuracy, prototype consistency và novelty
+vẫn giữ được tiếng nói.
+
+Đây là chế độ dùng cho phép thử và cho bản sửa.

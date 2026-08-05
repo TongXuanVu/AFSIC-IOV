@@ -3,7 +3,7 @@
   "dataset": "can_iov",
   "model_name": "afsic-iov",
   "convnet_type": "cnn1d",
-  "_comment_variant": "BAN SUA DAY DU (full data) — khop dac ta muc 5.7 va 6: trong so tong hop theo quy mo du lieu (beta_n), Drift tach khoi UpdateNorm (drift_mode=vs_mean). Chay lai TU TASK 0.",
+  "_comment_variant": "BAN SUA DAY DU (full data) — GIU moi co che AFSIC-IoV, them so hang quy mo chuan hoa (beta_n) va tach Drift/UpdateNorm. Chay lai tu task 0.",
   "_comment_memory": "Replay 1% moi lop (herding). Voi lop Benign ~29M mau viec herding 290k buoc chay tren GPU (fp16 GEMV) ~1h, chi 1 lan cuoi task 0",
   "memory_ratio": 0.01,
   "fixed_memory": false,
@@ -59,10 +59,11 @@
   "robust_filter_updates": false,
   "robust_z": 5.0,
   "beta_n": 1.0,
+  "size_term_mode": "norm",
   "drift_mode": "vs_mean",
-  "beta_acc": 0.0,
-  "beta_proto": 0.0,
-  "beta_novelty": 0.0,
-  "beta_drift": 0.0,
-  "beta_update": 0.0
+  "beta_acc": 1.0,
+  "beta_proto": 1.0,
+  "beta_novelty": 0.5,
+  "beta_drift": 0.01,
+  "beta_update": 0.01
 }
