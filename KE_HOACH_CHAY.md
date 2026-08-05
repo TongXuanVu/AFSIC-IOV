@@ -187,8 +187,10 @@ Nên `size_term_mode` có hai chế độ:
 | gốc (không có) | 0% | 0.150 / 0.160 / 0.130 / 0.130 / 0.136 / 0.126 / 0.087 / 0.081 |
 | *tỉ trọng dữ liệu thật* | | *0.299 / 0.300 / 0.300 / 0.062 / 0.038 / 0.001 / 0.000 / 0.000* |
 
-Chế độ `raw` cho α gần trùng tỉ trọng dữ liệu thật — đúng FedAvg, nên dùng để dựng
-**baseline** (`can_iov_baseline_fedavg.json`), không phải để sửa AFSIC-IoV.
+Chế độ `raw` cho α gần trùng tỉ trọng dữ liệu thật, tức đúng FedAvg — nên nó **không
+phải** bản sửa của AFSIC-IoV mà là một phương pháp khác. Giữ lại trong code chỉ để tham
+chiếu; nếu sau này cần dựng baseline FedAvg thì bật `size_term_mode: "raw"` cùng mọi
+beta khác bằng 0.
 
 Chế độ `norm` chuẩn hoá `log(1+n)` về [0,1] theo min–max giữa các client active, nên
 quy mô chỉ là **một trong bốn** số hạng. Client lớn được kéo từ 0,150 lên 0,190; client
