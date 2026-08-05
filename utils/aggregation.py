@@ -33,6 +33,18 @@ def compute_aggregation_weights(
     beta_novelty = args.get("beta_novelty", 0.5)
     beta_drift = args.get("beta_drift", 0.5)
     beta_update = args.get("beta_update", 0.2)
+    # beta_n: trọng số theo QUY MÔ DỮ LIỆU của client. Mặc định 0.0 nên không đổi
+    # hành vi của mọi config cũ.
+    #
+    # Vì alpha = softmax(Q/tau) và softmax(log n) = n_k / sum(n), nên đặt
+    # beta_n=1 cùng với mọi beta khác = 0 và tau=1 sẽ cho đúng FedAvg chuẩn.
+    #
+    # Cần thiết vì Q_i hiện chỉ gồm accuracy, độ nhất quán prototype, độ mới,
+    # drift và update-norm — KHÔNG có thành phần nào theo n_k. Với dữ liệu IoV
+    # 10 client (3 client nắm 89,8% dữ liệu), softmax cho alpha gần đều nhau,
+    # khiến client chỉ có 4.414 mẫu (0,004% dữ liệu) vẫn chiếm 14,3% mô hình
+    # toàn cục — khuếch đại 3.190 lần so với tỉ trọng thật.
+    beta_n = args.get("beta_n", 0.0)
     
     for c_idx, c in enumerate(active_client_indices):
         acc_i = client_accs[c]
@@ -82,13 +94,18 @@ def compute_aggregation_weights(
         drift_i = np.sqrt(drift_val / max(1, num_params))
         update_norm_i = np.sqrt(update_val / max(1, num_params))
         
-        Q_i = beta_acc * acc_i + beta_proto * proto_cons_i + beta_novelty * novelty_i - beta_drift * drift_i - beta_update * update_norm_i
+        # Số mẫu client dùng ở vòng này, lấy từ 'count' của prototype từng lớp
+        # (đã có sẵn, không cần đổi chữ ký hàm).
+        n_i = sum(int(info.get("count", 0)) for info in client_protos[c].values())
+        size_term = beta_n * float(np.log1p(max(n_i, 0)))
+
+        Q_i = size_term + beta_acc * acc_i + beta_proto * proto_cons_i + beta_novelty * novelty_i - beta_drift * drift_i - beta_update * update_norm_i
         Q_list.append(Q_i)
         drift_list.append(drift_i)
         update_norm_list.append(update_norm_i)
-        
+
         logging.info(
-            f"Client {c} => Q_i: {Q_i:.4f} | Acc: {acc_i*100:.2f}% | "
+            f"Client {c} => Q_i: {Q_i:.4f} | n_i: {n_i} | Acc: {acc_i*100:.2f}% | "
             f"ProtoCons: {proto_cons_i:.4f} | Novelty: {novelty_i:.4f} | "
             f"Drift: {drift_i:.4f} | UpdateNorm: {update_norm_i:.4f}"
         )
