@@ -38,3 +38,11 @@ no-use/
 !docs/figures/*.png
 .ipynb_checkpoints/
 data.zip
+
+# Tai lieu va ghi chu ke hoach: giu tren may, khong day len GitHub
+*.docx
+HANDOFF_*.md
+KE_HOACH_*.md
+PHAN_TICH_*.md
+TONG_KET_*.md
+*.zip
