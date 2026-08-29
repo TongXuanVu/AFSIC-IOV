@@ -33,10 +33,12 @@ class AFSIC_IoV(AFSIC_IDS):
         # Prototype cục bộ mới nhất của chính client này: {class_id: {"prototype", "count", "dispersion"}}
         self.local_protos = {}
 
-    def compute_local_prototypes(self, data_manager, class_ids=None, max_samples_per_class=None, seed=0):
+    def compute_local_prototypes(self, data_manager, class_ids=None, max_samples_per_class=None, seed=0,
+                                 report_full_count=False):
         protos = super().compute_local_prototypes(
             data_manager, class_ids=class_ids,
             max_samples_per_class=max_samples_per_class, seed=seed,
+            report_full_count=report_full_count,
         )
         self.local_protos.update(protos)
         return protos

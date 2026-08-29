@@ -138,17 +138,49 @@ def _build_standard_train_dataset(data_manager, local_model, args):
     return dataset
 
 
-def _build_local_eval_loader(data_manager, total_classes, batch_size):
+def _build_local_eval_loader(data_manager, total_classes, batch_size, max_samples=None,
+                             seed=0):
+    """Tap danh gia CUC BO de tinh acc_i (dau vao cua beta_acc trong Q_i).
+
+    TOI UU: chi client 0 co du lieu test, moi client khac roi xuong nhanh
+    source="train" -> forward TOAN BO du lieu huan luyen cua minh, MOI round,
+    chi de lay mot con so acc. Voi client 12,6 trieu mau day la mot luot day du.
+    `max_samples` (config: quality_eval_max_samples) lay mau ngau nhien co dinh
+    theo seed. Day la lay mau khi ĐO, khong cat du lieu huan luyen.
+    Mac dinh None = giu nguyen hanh vi cu.
+    """
     indices = np.arange(0, total_classes)
+    if max_samples is None:
+        dataset = data_manager.get_dataset(indices, source="test", mode="test")
+        if len(dataset) == 0:
+            dataset = data_manager.get_dataset(indices, source="train", mode="test")
+        return make_loader(dataset, batch_size=batch_size, shuffle=False) if len(dataset) else None
+
+    # Hai cai bay o day:
+    #   1. torch.utils.data.Subset -> make_loader khong nhan dang, roi ve
+    #      DataLoader chuan, cham 20-50 lan (utils/fast_loader.py).
+    #   2. get_dataset(ret_data=True) -> COPY toan bo mang truoc khi lay mau
+    #      (client lon: 12,6 trieu x 31 float16 = 780 MB).
+    # Cach dung: lay SubDummyDataset (vốn là VIEW) roi thay mang chi so cua no.
+    from utils.data_manager import SubDummyDataset
     dataset = data_manager.get_dataset(indices, source="test", mode="test")
     if len(dataset) == 0:
         dataset = data_manager.get_dataset(indices, source="train", mode="test")
     if len(dataset) == 0:
         return None
+    if isinstance(dataset, SubDummyDataset) and dataset.len_source > int(max_samples):
+        sel = np.sort(np.random.default_rng(seed).choice(
+            dataset.len_source, size=int(max_samples), replace=False))
+        dataset = SubDummyDataset(
+            dataset.x_source, dataset.y_source,
+            np.asarray(dataset.indices)[sel],
+            dataset.trsf, dataset.use_path,
+            (dataset.append_x, dataset.append_y) if dataset.append_x is not None else None)
     return make_loader(dataset, batch_size=batch_size, shuffle=False)
 
 
-def _build_global_learned_test_loader(global_data_manager, total_classes, batch_size):
+def _build_global_learned_test_loader(global_data_manager, total_classes, batch_size,
+                                      args_eval_cap=None):
     """Evaluate only classes that have already been introduced.
 
     CIC-IoT23 global_test_data can contain all 34 classes, while task 0 may
@@ -159,6 +191,45 @@ def _build_global_learned_test_loader(global_data_manager, total_classes, batch_
     dataset = global_data_manager.get_dataset(learned_classes, source="test", mode="test")
     if len(dataset) == 0:
         return None
+
+    # eval_max_per_class: gioi han SO MAU MOI LOP cua tap test.
+    #
+    # [ĐO] Danh gia ton 76 giay/round (log 15-08, round 1: 04:17:34 -> 04:18:50).
+    # Hien la 9% mot round, nhung sau khi bo ba luot do thua no thanh ~30%.
+    #
+    # Vi sao cat theo LOP chu khong danh gia thua round: tap test task 0 co
+    # 99,62% Benign, nen 99,62% chi phi danh gia nam o mot lop duy nhat. Cat
+    # Benign xuong 200k va GIU NGUYEN toan bo mau cua lop tan cong thi:
+    #   - rec_macro (recall trung binh theo lop) gan nhu khong doi: recall cua
+    #     lop hiem tinh tren DU mau nhu cu, recall cua Benign uoc luong tu 200k
+    #     mau (sai so chuan < 0,1%).
+    #   - f1_macro THI DOI, vi precision phu thuoc ti le lop.
+    #
+    # ⇒ Dung cho SANG LOC (cham diem bang rec_macro). Lan chay XAC NHAN cuoi
+    # cung phai dat lai None de lay dung con so dua vao luan van.
+    #
+    # Cach nay giu duoc duong cong TUNG ROUND — thu ma "5 round danh gia 1 lan"
+    # se pha: AFSIC thoat khoi nghiem hang so o round 9 va 11, luoi 5/10/15/20/
+    # 25/30 bo lot ca hai va cho ra mot duong thang 33,27 sai su that.
+    cap = args_eval_cap
+    if cap:
+        from utils.data_manager import SubDummyDataset
+        if isinstance(dataset, SubDummyDataset) and dataset.append_x is None:
+            idx = np.asarray(dataset.indices)
+            lab = np.asarray(dataset.y_source)[idx]
+            rng = np.random.default_rng(12345)      # co dinh -> moi round, moi arm cung tap test
+            keep = []
+            for c in np.unique(lab):
+                pos = np.nonzero(lab == c)[0]
+                if len(pos) > cap:
+                    pos = pos[np.sort(rng.choice(len(pos), size=int(cap), replace=False))]
+                keep.append(pos)
+            keep = np.sort(np.concatenate(keep))
+            if len(keep) < len(idx):
+                logging.info(f"eval_max_per_class={cap}: tap test {len(idx):,} -> {len(keep):,} mau "
+                             f"(rec_macro gan nhu khong doi; f1_macro KHONG so sanh duoc voi ban day du)")
+                dataset = SubDummyDataset(dataset.x_source, dataset.y_source, idx[keep],
+                                          dataset.trsf, dataset.use_path, None)
     return make_loader(dataset, batch_size=batch_size, shuffle=False)
 
 
@@ -230,10 +301,55 @@ def _aggregate_client_prototypes(global_model, client_protos, num_clients, args=
         global_model.global_proto_memory.update_prototype(class_id, global_proto, total_count, mean_dispersion, mean_quality)
 
 
-def _calibrate_classifier_from_prototypes(model):
+def _log_classifier_separability(model, tag=""):
+    """Chẩn đoán rẻ: fc là CosineLinear nên logit = sigma*cos(z, w_c).
+    Nếu mọi cặp w_c gần trùng nhau thì bộ phân loại KHÔNG THỂ tách lớp, bất kể
+    backbone tốt đến đâu -> mô hình sẽ đoán đúng một lớp. Log ma trận cosine
+    giữa các w_c dưới dạng min/mean/max để khỏi phải chạy lại mới biết.
+    """
+    try:
+        W = model._network.fc.weight.data.float()
+        W = torch.nn.functional.normalize(W, p=2, dim=1)
+        C = W @ W.t()
+        n = C.size(0)
+        if n < 2:
+            return
+        off = C[~torch.eye(n, dtype=torch.bool, device=C.device)]
+        logging.info(
+            f"[DIAG]{tag} classifier cos(w_i,w_j) off-diag: "
+            f"min={off.min():.4f} mean={off.mean():.4f} max={off.max():.4f} "
+            f"(gan 1.0 = khong tach duoc lop)"
+        )
+    except Exception as e:
+        logging.warning(f"[DIAG] khong tinh duoc classifier separability: {e}")
+
+
+def _calibrate_classifier_from_prototypes(model, is_task_init=False):
+    """Ghi trọng số classifier từ prototype.
+
+    LƯU Ý QUAN TRỌNG: fc là CosineLinear -> logit = sigma * cos(z, w_c), KHÔNG
+    có bias. init_new_class_weights_from_prototypes ghi đè w_c cho MỌI lớp
+    (bất kể tên hàm có chữ "new"). Hàm này chạy sau MỖI lần gộp trong vòng
+    round, nên mô hình toàn cục thực chất là bộ phân loại nearest-prototype:
+    mọi thứ fc học được trong local training và mọi thứ khâu gộp trọng số làm
+    với fc đều bị vứt bỏ mỗi round.
+
+    Hai cờ để kiểm soát, đều mặc định GIỮ NGUYÊN hành vi cũ:
+
+      calibrate_with_prototypes (mặc định true)
+          false -> tắt hẳn; classifier toàn cục là fc đã huấn luyện + gộp.
+      calibrate_once_per_task (mặc định false)
+          true  -> chỉ calibrate ở lúc khởi tạo task (đúng vai trò "khởi tạo
+                   lớp mới"), các round sau để fc học và được gộp bình thường.
+      calibrate_new_classes_only (mặc định false)
+          true  -> chỉ ghi đè các lớp thuộc task hiện tại, giữ nguyên phần đã
+                   học của lớp cũ.
+    """
     if not hasattr(model, "global_proto_memory"):
         return
     if not model.args.get("calibrate_with_prototypes", True):
+        return
+    if model.args.get("calibrate_once_per_task", False) and not is_task_init:
         return
     # AFSIC-IoV: dùng personalized prototypes (trộn local/global theo rho);
     # với global model không có local_protos, kết quả trùng global prototypes.
@@ -241,10 +357,11 @@ def _calibrate_classifier_from_prototypes(model):
         prototypes = model.get_calibration_prototypes()
     else:
         prototypes = model.global_proto_memory.get_all_prototypes()
-    model._network.init_new_class_weights_from_prototypes(
-        prototypes,
-        range(model._total_classes),
-    )
+    if model.args.get("calibrate_new_classes_only", False) and not is_task_init:
+        class_ids = range(model._known_classes, model._total_classes)
+    else:
+        class_ids = range(model._total_classes)
+    model._network.init_new_class_weights_from_prototypes(prototypes, class_ids)
 
 
 _PERSONALIZED_KEY_MARKERS = ("stability_encoder", "plasticity_adapter", "gate")
@@ -366,6 +483,13 @@ def _train_federated(args):
         client_dms.append(dm)
 
     nb_tasks = client_dms[0].nb_tasks
+    # max_tasks: dừng sớm sau N task đầu (mặc định None = chạy hết). Dùng để
+    # chạy thí nghiệm ablation ngắn trên task 0 mà không đụng tới dữ liệu hay
+    # task_increments (vốn bắt buộc phải cộng đủ số lớp).
+    _max_tasks = args.get("max_tasks")
+    if _max_tasks:
+        nb_tasks = min(nb_tasks, int(_max_tasks))
+        logging.info(f"max_tasks={_max_tasks} -> chi chay {nb_tasks} task dau")
     logging.info(f"Task increments: {client_dms[0]._increments}")
 
     global_model = factory.get_model(args["model_name"], args)
@@ -490,13 +614,17 @@ def _train_federated(args):
                     class_ids=range(local_models[c]._known_classes),
                     max_samples_per_class=args.get("proto_max_samples"),
                     seed=args.get("seed", 0) + c,
+                    report_full_count=True,   # cat mau chi de ĐO
                 )
-                max_samples = args.get("kshot", 10) if args.get("fewshot_enabled", True) else None
+                max_samples = (args.get("kshot", 10) if args.get("fewshot_enabled", True)
+                               else args.get("proto_max_samples"))
                 new_protos = local_models[c].compute_local_prototypes(
                     client_dms[c],
                     class_ids=range(local_models[c]._known_classes, local_models[c]._total_classes),
                     max_samples_per_class=max_samples,
                     seed=args.get("seed", 0) + task * 1009 + c,
+                    report_full_count=(max_samples is not None
+                                       and max_samples == args.get("proto_max_samples")),
                 )
                 protos = {}
                 protos.update(old_protos)
@@ -507,9 +635,9 @@ def _train_federated(args):
             
             for c in range(args["num_clients"]):
                 local_models[c].global_proto_memory = copy.deepcopy(global_model.global_proto_memory)
-                _calibrate_classifier_from_prototypes(local_models[c])
+                _calibrate_classifier_from_prototypes(local_models[c], is_task_init=True)
             
-            _calibrate_classifier_from_prototypes(global_model)
+            _calibrate_classifier_from_prototypes(global_model, is_task_init=True)
             logging.info("Class classifier weights successfully initialized from prototypes.")
 
             for c in range(args["num_clients"]):
@@ -578,7 +706,10 @@ def _train_federated(args):
                 if _is_afsic(args):
                     # Fast eval for client quality validation Acc
                     local_models[c]._network.eval()
-                    quality_loader = _build_local_eval_loader(client_dms[c], local_models[c]._total_classes, args["batch_size"])
+                    quality_loader = _build_local_eval_loader(
+                        client_dms[c], local_models[c]._total_classes, args["batch_size"],
+                        max_samples=args.get("quality_eval_max_samples"),
+                        seed=args.get("seed", 0) + c)
                     if quality_loader is not None:
                         test_acc_dict = local_models[c]._compute_accuracy(local_models[c]._network, quality_loader)
                         client_accs.append(test_acc_dict["total"] / 100.0)
@@ -598,16 +729,28 @@ def _train_federated(args):
                         class_ids=range(local_models[c]._known_classes),
                         max_samples_per_class=args.get("proto_max_samples"),
                         seed=args.get("seed", 0) + c,
+                        report_full_count=True,   # cat mau chi de ĐO
                     )
+                    # TOI UU: o task 0 (va moi khi khong bat few-shot) ban cu
+                    # truyen None -> duyet TOAN BO du lieu cua moi lop moi, cua
+                    # MOI client, MOI round, chi de tinh mot vector trung binh.
+                    # Prototype la mean cua feature da chuan hoa L2 nen n=20.000
+                    # da cho sai so lay mau ~0,7% (xem ghi chu proto_max_samples
+                    # o nhanh old_protos). Day la lay mau khi ĐO, khong phai cat
+                    # du lieu huan luyen — client van train tren toan bo du lieu.
+                    # Mac dinh None = giu nguyen hanh vi cu.
+                    _new_cap = (args.get("kshot", 10)
+                                if task > 0 and args.get("fewshot_enabled", True)
+                                else args.get("proto_max_samples"))
                     new_protos = local_models[c].compute_local_prototypes(
                         client_dms[c],
                         class_ids=range(local_models[c]._known_classes, local_models[c]._total_classes),
-                        max_samples_per_class=(
-                            args.get("kshot", 10)
-                            if task > 0 and args.get("fewshot_enabled", True)
-                            else None
-                        ),
+                        max_samples_per_class=_new_cap,
                         seed=args.get("seed", 0) + task * 1009 + c,
+                        # True chi khi cap den TU proto_max_samples (do luong).
+                        # Voi kshot/1% thi cat mau la THAT -> giu False.
+                        report_full_count=(_new_cap is not None
+                                           and _new_cap == args.get("proto_max_samples")),
                     )
                     protos = {}
                     protos.update(old_protos)
@@ -663,14 +806,86 @@ def _train_federated(args):
                     global_dict = copy.deepcopy(global_model._network.state_dict())
                     aggregate_backbone = args.get("aggregate_backbone", False)
 
+                    # Chuẩn hoá theo SỐ BƯỚC cục bộ (FedNova, Wang et al. 2020).
+                    #
+                    # Gộp thường:  θ ← Σ αᵢ·θᵢ            = θ₀ + Σ αᵢ·Δθᵢ
+                    # Chuẩn hoá :  θ ← θ₀ + τ̄ · Σ αᵢ·Δθᵢ/τᵢ ,  τ̄ = Σ αᵢ·τᵢ
+                    #
+                    # Chia cho τᵢ bỏ đi phần "client lớn đi xa hơn chỉ vì chạy
+                    # nhiều bước hơn"; nhân lại τ̄ giữ nguyên độ lớn bước tổng
+                    # nên tốc độ học không bị bóp. KHÔNG bỏ mẫu nào — mọi client
+                    # vẫn train trên toàn bộ dữ liệu của mình.
+                    #
+                    # Mặc định TẮT để mọi config cũ giữ nguyên hành vi.
+                    normalize_steps = args.get("normalize_local_steps", False)
+                    tau_l = None
+                    if normalize_steps and "tau_local" in agg_stats:
+                        tau_l = [max(1, agg_stats["tau_local"][accepted_positions[i]])
+                                 for i in range(len(alpha))]
+                        tau_bar = sum(alpha[i] * tau_l[i] for i in range(len(alpha)))
+                        logging.info(
+                            f"normalize_local_steps: tau_i {min(tau_l)}..{max(tau_l)} "
+                            f"| tau_bar={tau_bar:.1f}"
+                        )
+
+                    # ── P2: gộp THỐNG KÊ BatchNorm theo SỐ MẪU ──────────
+                    # running_mean/running_var là ước lượng của phân phối dữ
+                    # liệu, không phải biến tối ưu. Gộp chúng bằng alpha (gần
+                    # đều trên 50 client) cho ra thống kê không phản ánh phân
+                    # phối thật: client 1 batch chỉ dịch 10% về dữ liệu riêng
+                    # (momentum 0.1) còn client 1.543 batch hội tụ hẳn, rồi hai
+                    # loại đó bị trung bình ngang nhau.
+                    #
+                    # Cân theo n_i cho ước lượng không chệch. Trọng số mô hình
+                    # vẫn gộp theo alpha (chất lượng) như cũ.
+                    # Tham chiếu cho biến thể mạnh hơn: FedBN, Li et al. ICLR 2021.
+                    #
+                    # Mặc định TẮT để mọi config cũ giữ nguyên hành vi.
+                    bn_by_count = args.get("bn_stats_by_count", False)
+                    w_bn = None
+                    if bn_by_count and "n_samples" in agg_stats:
+                        ns = [max(1, agg_stats["n_samples"][accepted_positions[i]])
+                              for i in range(len(alpha))]
+                        tot = float(sum(ns))
+                        w_bn = [n / tot for n in ns]
+                        logging.info(
+                            f"bn_stats_by_count: n_i {min(ns)}..{max(ns)} "
+                            f"| w_bn {min(w_bn):.2e}..{max(w_bn):.4f}"
+                        )
+
                     for k in global_dict.keys():
-                        if is_aggregated_state_key(k, task, aggregate_backbone):
+                        if not is_aggregated_state_key(k, task, aggregate_backbone):
+                            continue
+                        # num_batches_tracked: trung bình có trọng số của một bộ
+                        # đếm là vô nghĩa; lấy max cho đúng ngữ nghĩa "đã thấy
+                        # bao nhiêu batch".
+                        if not global_dict[k].is_floating_point():
+                            if bn_by_count and client_weights_accepted:
+                                global_dict[k] = torch.stack(
+                                    [w[k] for w in client_weights_accepted]
+                                ).max(dim=0).values.to(global_dict[k].dtype)
+                            continue
+                        if w_bn is not None and ("running_mean" in k or "running_var" in k):
+                            val = client_weights_accepted[0][k].float() * w_bn[0]
+                            for c_idx in range(1, len(client_weights_accepted)):
+                                val += client_weights_accepted[c_idx][k].float() * w_bn[c_idx]
+                            global_dict[k] = val.to(global_dict[k].dtype)
+                            continue
+                        if tau_l is not None and k in global_state_round_start:
+                            base = global_state_round_start[k].float()
+                            acc = torch.zeros_like(base)
+                            for c_idx in range(len(client_weights_accepted)):
+                                acc += (client_weights_accepted[c_idx][k].float() - base) \
+                                       * (alpha[c_idx] / tau_l[c_idx])
+                            val = base + tau_bar * acc
+                        else:
                             val = client_weights_accepted[0][k].float() * alpha[0]
                             for c_idx in range(1, len(client_weights_accepted)):
                                 val += client_weights_accepted[c_idx][k].float() * alpha[c_idx]
-                            global_dict[k] = val.to(global_dict[k].dtype)
+                        global_dict[k] = val.to(global_dict[k].dtype)
                     global_model._network.load_state_dict(global_dict)
                     _calibrate_classifier_from_prototypes(global_model)
+                    _log_classifier_separability(global_model)
                 else:
                     global_weights = average_weights(client_weights)
                     global_model._network.load_state_dict(global_weights)
@@ -680,6 +895,7 @@ def _train_federated(args):
                 client_dms[0],
                 global_model._total_classes,
                 args["batch_size"],
+                args_eval_cap=args.get("eval_max_per_class"),
             )
             if global_model.test_loader is None:
                 logging.warning("Global learned-class test set is empty; skipping evaluation for this round.")
@@ -929,6 +1145,7 @@ def run_test(args):
             global_model._network.to(args["device"][0])
             global_model._network.eval()
             
+            # --mode test la duong lay CON SO BAO CAO -> khong bao gio cat tap test.
             global_model.test_loader = _build_global_learned_test_loader(
                 dm,
                 global_model._total_classes,

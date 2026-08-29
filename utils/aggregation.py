@@ -74,13 +74,52 @@ def compute_aggregation_weights(
     drift_mode = args.get("drift_mode", "vs_global")
     agg_bb = args.get("aggregate_backbone", False)
 
+    # ── P1: chỉ đo Δθ trên THAM SỐ, không đo trên buffer ────────────────────
+    # LỖI ĐÃ SỬA: vòng lặp cũ duyệt MỌI key của state_dict, nên bốn buffer
+    # `num_batches_tracked` (int64) của BatchNorm1d lọt vào phép tính. Sau một
+    # round mỗi bộ đếm tăng đúng bằng số batch cục bộ tau_i, đóng góp 4*tau_i^2
+    # vào tổng bình phương — áp đảo hoàn toàn phần trọng số thật.
+    #
+    # [ĐO] Kiểm trên log 100 client (n_par = 22.757, task 0):
+    #   sqrt(4*tau_i^2 / 22757) khớp UpdateNorm ghi trong log tới 4 chữ số cho
+    #   MỌI client lớn (vd client 30: tau=1543 -> 20,4568 vs log 20,4572).
+    #   Nói cách khác Drift/UpdateNorm cũ = số batch, không phải độ lớn update.
+    #
+    # Hệ quả: r_ic ở khâu gộp prototype (proto_beta_drift=0.5,
+    # proto_beta_update=0.2) bị bộ đếm chi phối, ưu ái client tí hon.
+    #
+    # exclude_bn_stats_from_norm: running_mean/running_var là THỐNG KÊ của dữ
+    # liệu, không phải biến tối ưu — mặc định cũng loại khỏi phép đo.
+    excl_bn = args.get("exclude_bn_stats_from_norm", True)
+
+    # legacy_update_norm: tai hien CHINH XAC hanh vi truoc khi va (co bug), de
+    # lam cot doi chung A/B trong bang ablation cua luan van. KHONG dung de chay
+    # thi nghiem that.
+    legacy = args.get("legacy_update_norm", False)
+    if legacy:
+        logging.warning(
+            "legacy_update_norm=True: Drift/UpdateNorm tinh CA num_batches_tracked "
+            "(tai hien bug cu). Chi dung lam cot doi chung."
+        )
+
+    def _is_measured(key, tensor):
+        if not is_aggregated_state_key(key, task, agg_bb):
+            return False
+        if legacy:
+            return True
+        if not tensor.is_floating_point():      # num_batches_tracked
+            return False
+        if excl_bn and ("running_mean" in key or "running_var" in key):
+            return False
+        return True
+
     diff_cache = {}          # c_idx -> {key: tensor diff}
     update_norm_cache = {}   # c_idx -> float
     for c_idx, _c in enumerate(active_client_indices):
         local_dict = client_weights[c_idx]
         diffs, sq, n_par = {}, 0.0, 0
         for k in local_dict.keys():
-            if is_aggregated_state_key(k, task, agg_bb):
+            if _is_measured(k, local_dict[k]):
                 d = local_dict[k].float() - global_state_round_start[k].float()
                 diffs[k] = d
                 sq += torch.sum(d ** 2).item()
@@ -199,8 +238,32 @@ def compute_aggregation_weights(
     tau_agg = args.get("tau_aggregation", 1.0)
     alpha = torch.softmax(Q_tensor / tau_agg, dim=0).tolist()
 
+    # Số bước optimizer cục bộ của mỗi client trong round này.
+    #
+    # VÌ SAO CẦN: `local_epochs=1` + batch cố định ⇒ số bước tỉ lệ THẲNG với n_i.
+    # Đo trên IoV 100 client task 0: client lớn nhất chạy 1.543 bước/round,
+    # client nhỏ nhất chạy 1 bước — chênh 1.543 lần, kéo theo ‖Δθ‖ chênh 1.295
+    # lần. `alpha` tác động lên trọng số CUỐI chứ không lên số bước, nên dù
+    # softmax(Q) có ưu ái client nhỏ tới đâu (đo được: khuếch đại 114 lần) thì
+    # lực kéo thực tế `alpha·‖Δθ‖` vẫn là 295:1 nghiêng về client lớn — còn lệch
+    # hơn cả tỉ trọng dữ liệu thật (269:1).
+    #
+    # Đây chính là "objective inconsistency" mà FedNova (Wang et al., NeurIPS
+    # 2020) mô tả. Trainer dùng đại lượng này để chuẩn hoá Δθ theo số bước khi
+    # bật `normalize_local_steps`.
+    bs = max(1, int(args.get("batch_size", 8192)))
+    le = max(1, int(args.get("local_epochs", 1)))
+    tau_local = [max(1, int(np.ceil(n_cache[c] / bs)) * le)
+                 for c in active_client_indices]
+
     # Stats per-client (theo vị trí trong active_client_indices) cho
     # per-class reliability-aware prototype aggregation ở trainer.
-    client_stats = {"drift": drift_list, "update_norm": update_norm_list}
+    # n_samples: số mẫu mỗi client (theo vị trí trong active_client_indices).
+    # Trainer dùng để gộp THỐNG KÊ BatchNorm theo số mẫu thay vì theo alpha
+    # (xem bn_stats_by_count).
+    n_samples = [int(n_cache[c]) for c in active_client_indices]
+
+    client_stats = {"drift": drift_list, "update_norm": update_norm_list,
+                    "tau_local": tau_local, "n_samples": n_samples}
 
     return alpha, accepted_positions, Q_accepted, client_stats

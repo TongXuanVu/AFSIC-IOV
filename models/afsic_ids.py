@@ -131,10 +131,22 @@ class AFSIC_IDS(BaseLearner):
         epochs = self.args.get("epochs", 30)
         
         # 1. Compute class weights for Class-balanced CE
-        class_counts = torch.zeros(self._total_classes).to(self._device)
-        for _, _, targets in train_loader:
-            targets = targets.to(self._device)
-            class_counts += torch.bincount(targets, minlength=self._total_classes)
+        #
+        # TOI UU (chinh xac tuyet doi, khong phai xap xi): class_counts chi phu
+        # thuoc DU LIEU nen trong mot task no KHONG DOI qua cac round. Ban cu
+        # duyet lai TOAN BO train_loader moi round chi de dem nhan — voi client
+        # 12,6 trieu mau day la mot luot doc du lieu day du, ngang chi phi mot
+        # epoch huan luyen. Cache theo (_cur_task, _total_classes).
+        _ck = getattr(self, "_class_counts_cache", None)
+        if _ck is not None and _ck[0] == (self._cur_task, self._total_classes):
+            class_counts = _ck[1].to(self._device)
+        else:
+            class_counts = torch.zeros(self._total_classes).to(self._device)
+            for _, _, targets in train_loader:
+                targets = targets.to(self._device)
+                class_counts += torch.bincount(targets, minlength=self._total_classes)
+            self._class_counts_cache = ((self._cur_task, self._total_classes),
+                                        class_counts.detach().cpu().clone())
         
         total_samples = class_counts.sum()
         class_weights = torch.zeros(self._total_classes).to(self._device)
@@ -291,7 +303,8 @@ class AFSIC_IDS(BaseLearner):
                 features_normalized=True, device=self._device,
             )
 
-    def compute_local_prototypes(self, data_manager, class_ids=None, max_samples_per_class=None, seed=0):
+    def compute_local_prototypes(self, data_manager, class_ids=None, max_samples_per_class=None, seed=0,
+                                 report_full_count=False):
         """Tính prototype dạng streaming 1 lượt — không giữ ma trận feature trong RAM.
 
         Tương đương chính xác với bản cũ về mặt toán học: với m = mean(feature
@@ -308,27 +321,45 @@ class AFSIC_IDS(BaseLearner):
         rng = np.random.default_rng(seed)
         for class_idx in class_ids:
             if max_samples_per_class is not None:
-                data, targets, dset = data_manager.get_dataset(
+                # Lay mau tren VIEW (SubDummyDataset), KHONG dung ret_data=True.
+                # ret_data=True copy nguyen mang cua lop truoc khi lay mau — voi
+                # lop Benign 29 trieu mau day la ~1,8 GB moi client moi round,
+                # dat hon chinh phep tinh no dinh thay the.
+                from utils.data_manager import SubDummyDataset
+                dset = data_manager.get_dataset(
                     np.arange(class_idx, class_idx + 1),
                     source="train",
                     mode="test",
-                    ret_data=True,
                 )
-                if len(data) == 0:
+                n_all = len(dset)
+                if n_all == 0:
                     continue
                 # max_samples_per_class < 1 => hiểu là TỈ LỆ (kịch bản 1%);
                 # >= 1 => số mẫu tuyệt đối (10-shot, proto_max_samples).
                 _cap = float(max_samples_per_class)
-                _cap = max(1, int(round(_cap * len(data)))) if _cap < 1.0 else int(_cap)
-                if len(data) > _cap:
-                    selected = rng.choice(len(data), size=_cap, replace=False)
-                    data = data[selected] if isinstance(data, np.ndarray) else [data[int(i)] for i in selected]
-                    targets = targets[selected] if isinstance(targets, np.ndarray) else [targets[int(i)] for i in selected]
-                    from utils.data_manager import DummyDataset
-                    from torchvision import transforms
-                    trsf = transforms.Compose([*data_manager._test_trsf, *data_manager._common_trsf])
-                    dset = DummyDataset(data, targets, trsf, data_manager.use_path)
-                count = len(data)
+                _cap = max(1, int(round(_cap * n_all))) if _cap < 1.0 else int(_cap)
+                if n_all > _cap and isinstance(dset, SubDummyDataset) and dset.append_x is None:
+                    selected = np.sort(rng.choice(dset.len_source, size=_cap, replace=False))
+                    dset = SubDummyDataset(
+                        dset.x_source, dset.y_source,
+                        np.asarray(dset.indices)[selected],
+                        dset.trsf, dset.use_path, None)
+                    n_used = _cap
+                else:
+                    n_used = n_all
+                # "count" tra ve duoc dung lam n_i o khau gop (size_term
+                # beta_n, tau_local cua FedNova, r_ic cua gop prototype,
+                # n_samples cua bn_stats_by_count). Phan biet HAI truong hop:
+                #
+                #   report_full_count=True  — cat mau chi de ĐO (proto_max_samples).
+                #       Client van train tren toan bo du lieu, nen n_i phai la so
+                #       mau THAT. Neu bao so da lay mau thi viec toi uu se ngam
+                #       bop meo dung nhung dai luong dang nghien cuu.
+                #
+                #   report_full_count=False — cat mau la THAT (kshot/1%): client
+                #       chi co tung ay mau. Bao dung so da dung. Mac dinh, giu
+                #       nguyen hanh vi cu cua hai kich ban few-shot.
+                count = n_all if report_full_count else n_used
             else:
                 # Không subsample: dùng dataset dạng view, KHÔNG copy dữ liệu lớp
                 dset = data_manager.get_dataset(
@@ -337,6 +368,7 @@ class AFSIC_IDS(BaseLearner):
                     mode="test",
                 )
                 count = len(dset)
+                n_used = count
                 if count == 0:
                     continue
 
@@ -352,7 +384,7 @@ class AFSIC_IDS(BaseLearner):
             if feat_sum is None:
                 continue
 
-            mean_vec = feat_sum / count
+            mean_vec = feat_sum / n_used
             mean_norm = float(torch.norm(mean_vec, p=2))
             prototype = (mean_vec / (mean_norm + 1e-8)).float()
             dispersion = max(0.0, 1.0 - mean_norm)
