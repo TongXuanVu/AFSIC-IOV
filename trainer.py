@@ -1067,6 +1067,13 @@ def _train_federated(args):
 
         logging.info(f"Xây dựng Rehearsal Memory cho các Clients tại cuối Task {task}...")
         current_client_start = checkpoint.get('last_client_done', -1) + 1 if (checkpoint is not None and task == checkpoint['task']) else 0
+        # force_rebuild_memory: dung lai bo nho exemplar tu dau du checkpoint bao
+        # da xong (last_client_done=99). Can khi DOI CHINH SACH replay
+        # (memory_ratio -> memory_size chia deu) ma khong muon chay lai ca task 0.
+        if args.get("force_rebuild_memory", False):
+            logging.info("force_rebuild_memory=True -> dung lai exemplar cho ca 100 client "
+                         "theo chinh sach replay MOI (bo qua last_client_done cua checkpoint).")
+            current_client_start = 0
         
         for c in range(args["num_clients"]):
             if c >= current_client_start:
