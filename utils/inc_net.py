@@ -157,13 +157,32 @@ class AFSICIDSNet(nn.Module):
 
             self.stability_encoder = FusedFeatureExtractor(self.stability_encoder, self.plasticity_adapter, self.gate)
         
+        _plastic = bool(self.args.get("plastic_source_trainable", False))
+
         class BottleneckFeatureAdapter(nn.Module):
-            def __init__(self, feature_source, feature_dim, bottleneck_dim):
+            """Nhanh plasticity.
+
+            MAC DINH (plastic_source_trainable=False, hanh vi cu): frozen_source bi
+            dong bang VA duoc goi trong torch.no_grad(), nen ca nhanh plasticity chi
+            la mot MLP residual tren 64 con so da dong bang tu task 0. No KHONG BAO
+            GIO nhin thay du lieu goc. Neu lop cua task moi khong tach duoc trong
+            khong gian dac trung task 0 thi khong do rong adapter nao cuu duoc —
+            thong tin da mat truoc do.
+
+            plastic_source_trainable=True: mo dong bang va cho gradient chay qua,
+            nen nhanh plasticity trich duoc dac trung MOI tu du lieu goc — dung dieu
+            HFIN lam bang cach them mot backbone moi moi task, nhung KHONG tang so
+            tham so (comm cost giu ~0,13 MB thay vi tang tuyen tinh nhu HFIN).
+            Nhanh stability van dong bang, nen doi lap stability/plasticity duoc giu.
+            """
+            def __init__(self, feature_source, feature_dim, bottleneck_dim, plastic=False):
                 super().__init__()
+                self.plastic = plastic
                 self.frozen_source = copy.deepcopy(feature_source)
                 for p in self.frozen_source.parameters():
-                    p.requires_grad = False
-                self.frozen_source.eval()
+                    p.requires_grad = plastic
+                if not plastic:
+                    self.frozen_source.eval()
                 self.adapter = nn.Sequential(
                     nn.Linear(feature_dim, bottleneck_dim),
                     nn.ReLU(inplace=True),
@@ -171,16 +190,20 @@ class AFSICIDSNet(nn.Module):
                 )
 
             def extract_vector(self, x):
-                self.frozen_source.eval()
-                with torch.no_grad():
+                if self.plastic:
                     base = self.frozen_source.extract_vector(x)
+                else:
+                    self.frozen_source.eval()
+                    with torch.no_grad():
+                        base = self.frozen_source.extract_vector(x)
                 return base + self.adapter(base)
 
             def forward(self, x):
                 return {"features": self.extract_vector(x)}
 
         bottleneck_dim = int(self.args.get("adapter_bottleneck", max(8, self.feature_dim // 4)))
-        self.plasticity_adapter = BottleneckFeatureAdapter(self.stability_encoder, self.feature_dim, bottleneck_dim)
+        self.plasticity_adapter = BottleneckFeatureAdapter(
+            self.stability_encoder, self.feature_dim, bottleneck_dim, plastic=_plastic)
         self.gate = VectorGate(self.feature_dim)
         self.to(self._device)
 
@@ -204,7 +227,9 @@ class AFSICIDSNet(nn.Module):
     def get_trainable_incremental_params(self):
         params = []
         if self.plasticity_adapter is not None:
-            params.extend(self.plasticity_adapter.parameters())
+            # plastic_source_trainable=True thi frozen_source cung nam trong
+            # .parameters() voi requires_grad=True nen tu dong duoc huan luyen.
+            params.extend(p for p in self.plasticity_adapter.parameters() if p.requires_grad)
         if self.gate is not None:
             params.extend(self.gate.parameters())
         if self.fc is not None:

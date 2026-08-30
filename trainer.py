@@ -854,7 +854,8 @@ def _train_federated(args):
                         )
 
                     for k in global_dict.keys():
-                        if not is_aggregated_state_key(k, task, aggregate_backbone):
+                        if not is_aggregated_state_key(k, task, aggregate_backbone,
+                                       args.get("plastic_source_trainable", False)):
                             continue
                         # num_batches_tracked: trung bình có trọng số của một bộ
                         # đếm là vô nghĩa; lấy max cho đúng ngữ nghĩa "đã thấy

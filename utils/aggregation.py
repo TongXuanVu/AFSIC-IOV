@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-def is_aggregated_state_key(key, task, aggregate_backbone=False):
+def is_aggregated_state_key(key, task, aggregate_backbone=False, plastic_source=False):
     # Lưu ý PerFL (personalized_adapter): server VẪN aggregate adapter/gate để
     # global model có nhánh plasticity ý nghĩa khi đánh giá; tính cá nhân hóa
     # nằm ở phía client — client KHÔNG nạp đè adapter/gate cục bộ của mình
@@ -11,7 +11,11 @@ def is_aggregated_state_key(key, task, aggregate_backbone=False):
     if task == 0 or aggregate_backbone:
         return True
     if "plasticity_adapter.frozen_source" in key:
-        return False
+        # Khi plastic_source_trainable=True, frozen_source la mot backbone DUOC
+        # HUAN LUYEN -> bat buoc phai gop, neu khong moi client giu rieng mot ban
+        # va khong bao gio hoc chung duoc gi. Comm cost tang ~0,13 -> ~0,22 MB,
+        # van co dinh qua cac task (HFIN tang tuyen tinh: 5x o task 4).
+        return bool(plastic_source)
     return any(sub in key for sub in ["plasticity_adapter.adapter", "gate", "fc"])
 
 def compute_aggregation_weights(
@@ -73,6 +77,7 @@ def compute_aggregation_weights(
     # trước vòng lặp chính.
     drift_mode = args.get("drift_mode", "vs_global")
     agg_bb = args.get("aggregate_backbone", False)
+    plastic_src = args.get("plastic_source_trainable", False)
 
     # ── P1: chỉ đo Δθ trên THAM SỐ, không đo trên buffer ────────────────────
     # LỖI ĐÃ SỬA: vòng lặp cũ duyệt MỌI key của state_dict, nên bốn buffer
@@ -103,7 +108,7 @@ def compute_aggregation_weights(
         )
 
     def _is_measured(key, tensor):
-        if not is_aggregated_state_key(key, task, agg_bb):
+        if not is_aggregated_state_key(key, task, agg_bb, plastic_src):
             return False
         if legacy:
             return True
