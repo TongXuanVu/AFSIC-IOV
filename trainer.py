@@ -1011,8 +1011,14 @@ def _train_federated(args):
                 plot_confusion_matrix(y_true, y_pred, task, run_dir)
 
             # Lưu Checkpoint mỗi Round
-            client_states = []
-            for c in range(args["num_clients"]):
+            #
+            # ckpt_every_n_rounds: 0 = KHONG luu. Moi checkpoint chua state cua
+            # CA 100 client (~52 MB), 30 round = ~1,5 GB. Khi sang loc ablation
+            # task 0 thi khong ai resume tu day ca.
+            _cke = args.get("ckpt_every_n_rounds", 1)
+            if _cke and (round_idx + 1) % int(_cke) == 0:
+              client_states = []
+              for c in range(args["num_clients"]):
                 client_states.append({
                     'data_memory': getattr(local_models[c], '_data_memory', None),
                     'targets_memory': getattr(local_models[c], '_targets_memory', None),
@@ -1025,8 +1031,8 @@ def _train_federated(args):
                     # ngẫu nhiên (loss round 1 task 1 nhảy 1.6 -> 3.3).
                     'net': {k: v.cpu() for k, v in local_models[c]._network.state_dict().items()},
                 })
-            ckpt_name = f'ckpt_round{global_round+1:04d}_task{task:02d}_r{round_idx+1:03d}_acc{cnn_accy["top1"]:.1f}.pth'
-            torch.save({
+              ckpt_name = f'ckpt_round{global_round+1:04d}_task{task:02d}_r{round_idx+1:03d}_acc{cnn_accy["top1"]:.1f}.pth'
+              torch.save({
                 'task': task,
                 'round': round_idx,
                 'global_round': global_round,
@@ -1035,9 +1041,30 @@ def _train_federated(args):
                 'client_states': client_states,
                 'global_proto_memory': getattr(global_model, 'global_proto_memory', None),
                 'metrics': cnn_accy
-            }, os.path.join(ckpt_dir, ckpt_name))
+              }, os.path.join(ckpt_dir, ckpt_name))
 
         # Cuối Task, xây dựng lại bộ nhớ Rehearsal
+        #
+        # [ĐO] Pha nay ton 2 GIO 6 PHUT va 6,6 GB cho MOT lan chay task 0
+        # (log 29-08: round 30 xong luc 15:17, "Training Finished" luc 17:23).
+        # Ly do: voi MOI client c no luu mot checkpoint chua state cua CA 100
+        # client -> O(n^2). Cong them herding tren lop Benign 29 trieu mau.
+        #
+        # Bo nho nay chi duoc DUNG o task SAU. O task cuoi cung duoc chay
+        # (max_tasks, hoac task cuoi that su) no khong bao gio duoc doc.
+        # Voi ablation task 0 thi day la 40% thoi gian va toan bo dung luong,
+        # tieu vao thu khong ai dung.
+        _het_task = (task >= nb_tasks - 1)
+        if args.get("skip_memory_phase", False) or (_het_task and args.get("max_tasks")):
+            logging.info(
+                f"BO QUA pha Rehearsal Memory o task {task} (task cuoi duoc chay) "
+                f"— tiet kiem ~2 gio va ~6,6 GB. Dat skip_memory_phase=false neu "
+                f"can checkpoint de chay tiep task sau.")
+            for c in range(args["num_clients"]):
+                local_models[c].after_task()
+            global_model.after_task()
+            break
+
         logging.info(f"Xây dựng Rehearsal Memory cho các Clients tại cuối Task {task}...")
         current_client_start = checkpoint.get('last_client_done', -1) + 1 if (checkpoint is not None and task == checkpoint['task']) else 0
         

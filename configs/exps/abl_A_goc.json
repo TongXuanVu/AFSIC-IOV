@@ -81,5 +81,7 @@
   "exclude_bn_stats_from_norm": false,
   "proto_max_samples": 20000,
   "quality_eval_max_samples": 50000,
-  "eval_max_per_class": 200000
+  "eval_max_per_class": 200000,
+  "skip_memory_phase": true,
+  "ckpt_every_n_rounds": 10
 }

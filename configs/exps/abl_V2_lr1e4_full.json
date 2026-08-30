@@ -82,5 +82,7 @@
   "max_tasks": 1,
   "exclude_bn_stats_from_norm": true,
   "bn_stats_by_count": true,
-  "calibrate_once_per_task": true
+  "calibrate_once_per_task": true,
+  "skip_memory_phase": true,
+  "ckpt_every_n_rounds": 10
 }
