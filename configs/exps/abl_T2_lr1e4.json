@@ -3,9 +3,9 @@
   "dataset": "can_iov",
   "model_name": "afsic-iov",
   "convnet_type": "cnn1d",
-  "_comment_variant": "SUA lr 3e-5 -> 1e-4. [DO] lr 3e-5 + cap64 chi dat 42,78 con lr 1e-4 + cap64 dat 50,96 — ha lr KHONG on dinh hoa cap64 (do lech chuan 7,42 vs 8,00, gan nhu nhau). Do on dinh cua arm lr3e5 (0,76) den tu bottleneck 16 mac dinh, khong phai tu lr. Arm nay = cong thuc thang + replay chia deu 2.000/lop.",
+  "_comment_variant": "TASK 2 voi cong thuc THANG (lr 1e-4). T2_best chay o lr 3e-5 (co so yeu hon) ma task 2 da dat 43,87. Chay lai o 1e-4 de biet tran that. Nguong task 2: 11,11.",
   "_comment_memory": "Replay 1% moi lop (herding). Voi lop Benign ~29M mau viec herding 290k buoc chay tren GPU (fp16 GEMV) ~1h, chi 1 lan cuoi task 0",
-  "memory_ratio": null,
+  "memory_ratio": 0.01,
   "fixed_memory": false,
   "shuffle": false,
   "_comment_tasks": "5 task CAN-bus: [Benign,DoS,double] [force-neutral,fuzzing,interval] [rpm,rpm-accessory,speed] [speed-accessory,standstill] [systematic,triple]",
@@ -83,7 +83,5 @@
   "memory_ckpt_per_client": false,
   "plastic_source_trainable": true,
   "adapter_bottleneck": 64,
-  "max_tasks": 2,
-  "memory_size": 26000,
-  "force_rebuild_memory": true
+  "max_tasks": 3
 }

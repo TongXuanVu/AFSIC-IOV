@@ -3,7 +3,7 @@
   "dataset": "can_iov",
   "model_name": "afsic-iov",
   "convnet_type": "cnn1d",
-  "_comment_variant": "XAC NHAN 5 task, 150 round. Cong thuc thang: personalized_adapter=false + plastic_source_trainable=true + adapter_bottleneck=64. lr: milestones[15] gamma 0.3 -> 1e-4 cho round 1-15 (muc DA CHUNG MINH o task 0: 42,04) roi 3e-5 cho round 16-30 (muc DA CHUNG MINH on dinh o task 1: do lech chuan 0,76). [GIA THUYET] lich nay CHUA duoc kiem — suy ra tu hai arm rieng le. SO BAO CAO lay bang --mode test tren checkpoint cuoi moi task (tap test day du).",
+  "_comment_variant": "XAC NHAN 5 task, 150 round. Cong thuc thang DO DUOC tren task 0, 1 va 2: lr 1e-4 CO DINH + personalized_adapter=false + plastic_source_trainable=true + adapter_bottleneck=64. Da bo lich milestones[15] gamma 0.3 cua ban truoc — do la suy dien SAI: lr 3e-5 lam TE DI o task 1 (42,78 vs 50,96). SO BAO CAO lay bang --mode test tren checkpoint cuoi moi task.",
   "_comment_memory": "Replay 1% moi lop (herding). Voi lop Benign ~29M mau viec herding 290k buoc chay tren GPU (fp16 GEMV) ~1h, chi 1 lan cuoi task 0",
   "memory_ratio": 0.01,
   "fixed_memory": false,
@@ -31,10 +31,8 @@
   "local_epochs": 1,
   "lr": 0.0001,
   "weight_decay": 0.0002,
-  "milestones": [
-    15
-  ],
-  "gamma": 0.3,
+  "milestones": [],
+  "gamma": 0.1,
   "_comment_data": "max_samples_per_class: giới hạn mẫu mỗi lớp mỗi client (null = dùng toàn bộ ~98M mẫu); test_max_samples_per_class tương tự cho test set",
   "max_samples_per_class": null,
   "test_max_samples_per_class": null,
