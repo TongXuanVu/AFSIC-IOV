@@ -29,7 +29,27 @@ ba nhóm — chỉ nhóm A ảnh hưởng tới kết quả học.
 `plastic_source_trainable` và `adapter_bottleneck` **chỉ có tác dụng từ task 1**
 (task 0 chưa tạo adapter). Ở task 0 chỉ `lr` và `milestones` có nghĩa.
 
-### B. Bảy khoá cắt chi phí — không đổi dữ liệu huấn luyện
+### B. Bảy khoá cắt chi phí — **KHÔNG dùng cho lượt chính thức**
+
+⚠ **Đính chính.** Tôi từng gọi cả nhóm này là "không đụng dữ liệu". Sai. Chỉ
+**dữ liệu huấn luyện** là nguyên vẹn. Ba khoá dưới đây có cắt dữ liệu, chỉ là
+cắt ở chỗ khác:
+
+| khoá | cắt cái gì | hậu quả |
+|---|---|---|
+| `proto_max_samples` | dữ liệu dùng để **tính prototype** | Prototype → `r_ic` → gộp prototype → `fc`. **Đổi quỹ đạo học.** |
+| `quality_eval_max_samples` | dữ liệu dùng để **tính `acc_i`** | `acc_i` → `beta_acc` → `Q_i` → `alpha`. **Đổi quỹ đạo học.** |
+| `eval_max_per_class` | **tập test** | Chỉ đổi con số báo cáo, không đổi việc học. |
+
+Chỉ hai khoá thực sự vô hại: cache `class_counts` (chính xác tuyệt đối — đại
+lượng này không đổi trong một task) và `memory_ckpt_per_client` (đổi cách lưu
+checkpoint, không đổi phép tính nào).
+
+⇒ **Lượt chính thức dùng `configs/exps/xacnhan_CHINH_THUC.json`**, ở đó cả ba
+khoá trên đều `null`. Xem mục 3.
+
+Bảng dưới là chế độ SÀNG LỌC, chỉ dùng khi so sánh nhiều arm với nhau (mọi arm
+cùng thiết lập nên so sánh tương đối vẫn hợp lệ):
 
 | khoá | giá trị | tác dụng |
 |---|---|---|
@@ -81,7 +101,29 @@ Task 2 từ **0,04** — dưới cả ngưỡng đoán một lớp, tức phân 
 
 ## 3. Cách chạy
 
-### Lượt full 5 task, 150 round — chia 3 session
+### Lượt CHÍNH THỨC — không xấp xỉ gì
+
+```
+python main.py --config configs/exps/xacnhan_CHINH_THUC.json
+```
+
+`proto_max_samples`, `quality_eval_max_samples`, `eval_max_per_class` đều
+`null`. `ckpt_every_n_rounds: 1` — lưu và đánh giá **mỗi round** trên tập test
+đầy đủ 41,8 triệu mẫu.
+
+**Chi phí: ~13,7 phút/round → ~34 giờ cho 150 round, cộng ~4 giờ pha memory
+≈ 38 giờ.** So với ~20 giờ ở chế độ sàng lọc. Chia 5–6 session.
+
+⚠ `ckpt_every_n_rounds: 1` ở task ≥1 thì mỗi checkpoint chứa cả exemplar memory
+của 100 client (~80–200 MB). 30 round/task có thể tới 6 GB — vẫn dưới hạn 20 GB
+output của Kaggle **nếu mỗi session chỉ chạy 1–2 task**. Đừng dồn cả 5 task vào
+một session.
+
+⚠ Công thức được **tinh chỉnh ở chế độ sàng lọc**. Bỏ hai khoá xấp xỉ đi thì
+`Q_i` và prototype được tính chính xác hơn, nên kết quả **có thể khác** con số
+42,04 / 50,96 / 43,87. Khác theo hướng nào thì chưa ai đo.
+
+### Lượt sàng lọc (rẻ hơn, để so nhiều arm)
 
 ```
 python main.py --config configs/exps/xacnhan_FINAL_5task.json
