@@ -81,11 +81,21 @@ def main():
     if model.test_loader is None:
         print("[!] Tap test rong."); return
 
-    accy, _, y_pred, y_true = model.eval_task()
+    # Goi thang _eval_cnn thay vi eval_task vi hai ly do:
+    #   1. y_pred cua no la [N, topk] -> phai lay cot 0 (top-1).
+    #   2. eval_task GHI DE y_pred bang du doan NME neu model co _class_means
+    #      (base.py:103-104), trong khi acc/f1 bao cao lai la cua nhanh CNN.
+    #      Goi thang _eval_cnn thi chac chan dang xem dung nhanh CNN.
+    y_pred, y_true, loss = model._eval_cnn(model.test_loader)
+    accy = model._evaluate(y_pred, y_true, loss=loss)
+    y_pred = np.asarray(y_pred)
+    y_pred_top1 = y_pred[:, 0] if y_pred.ndim > 1 else y_pred.ravel()
+    y_true = np.asarray(y_true).ravel()
+
     K = model._total_classes
     ten = TEN_LOP[:K]
 
-    cm = confusion_matrix(y_true, y_pred, labels=list(range(K)))
+    cm = confusion_matrix(y_true, y_pred_top1, labels=list(range(K)))
     tong = cm.sum()
 
     print(f"\nTong mau test: {tong:,}   ({K} lop da hoc)")
@@ -110,7 +120,7 @@ def main():
               f"   n={s:,}")
 
     print("\n=== BAO CAO TUNG LOP ===")
-    print(classification_report(y_true, y_pred, labels=list(range(K)),
+    print(classification_report(y_true, y_pred_top1, labels=list(range(K)),
                                 target_names=ten, digits=4, zero_division=0))
 
     if a.csv:
