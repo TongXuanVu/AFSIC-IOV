@@ -208,8 +208,10 @@ cuối; round 29 chỉ có 37,39. Nếu có ngân sách, chạy thêm seed 43 v�
 trung bình ± độ lệch chuẩn.
 
 **`abl_T1_best_replay` chưa chạy.** Replay chia đều 2.000/lớp (chính sách HFIN)
-thay vì 1 % mỗi lớp. Hiện tỉ lệ trong bộ nhớ là **72.500 : 1** giữa Benign và
-lớp hiếm, còn HFIN là **1 : 1**. Đây là cơ chế cuối của HFIN chưa được thử, và
+thay vì 1 % mỗi lớp. `[ĐO]` — mở thẳng `ckpt_LR1_task00_FINAL.pth` ra đếm, cuối
+task 0 bộ nhớ replay có **976.717 exemplar** nằm ở 50/100 client:
+Benign 973.025 | DoS 3.396 | double 296 → **3.287 : 1**. HFIN chia **1 : 1**.
+(Con số "72.500 : 1" ở các bản trước là ước lượng và SAI.) Đây là cơ chế cuối của HFIN chưa được thử, và
 nó nhắm đúng vào việc quên ở các task sau.
 
 **Vẫn kém HFIN ở mọi task**, rõ nhất ở task 2 (43,87 so với 68,68). Đừng viết
