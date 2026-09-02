@@ -3,7 +3,7 @@
   "dataset": "can_iov",
   "model_name": "afsic-iov",
   "convnet_type": "cnn1d",
-  "_comment_variant": "SESSION TASK 1..4 — LUON chay kem --resume tu checkpoint task 0. lr 3e-5 (task 1 f1 TB10 30,65 va 14/30 round tren f1 30; lr 1e-4 chi 25,65 va 3/30). Neu chay file nay MA KHONG --resume thi task 0 se chay sai lr. KHONG XAP XI: proto_max_samples / quality_eval_max_samples / eval_max_per_class deu null, nen duong cong round-by-round DA LA so tren tap test day du 41,8M mau. ckpt_every_n_rounds=1. CHAM DIEM BANG f1_macro VA acc — KHONG bang rec_macro (xem CACH_CHAY.md muc 1: rec_macro cho diem cao cho dung trang thai hong nhat). adapter_bottleneck da BO: 64 va 128 deu kem mac dinh 16 theo f1_macro. KICH BAN FULL: task 1..4 dung TOAN BO mau lop moi.",
+  "_comment_variant": "SESSION TASK 1..4 — LUON chay kem --resume tu checkpoint task 0. lr 3e-5 (task 1 f1 TB10 30,65 va 14/30 round tren f1 30; lr 1e-4 chi 25,65 va 3/30). Neu chay file nay MA KHONG --resume thi task 0 se chay sai lr. KHONG XAP XI: proto_max_samples / quality_eval_max_samples / eval_max_per_class deu null, nen duong cong round-by-round DA LA so tren tap test day du 41,8M mau. ckpt_every_n_rounds=1. CHAM DIEM BANG f1_macro VA acc — KHONG bang rec_macro (xem CACH_CHAY.md muc 1: rec_macro cho diem cao cho dung trang thai hong nhat). adapter_bottleneck da BO: 64 va 128 deu kem mac dinh 16 theo f1_macro. KICH BAN FULL: task 1..4 dung TOAN BO mau lop moi. calibrate_once_per_task=true: prototype CHI ghi de fc MOT LAN luc khoi tao task (dung vai tro khoi tao lop moi); 30 round sau do fc duoc client huan luyen va server gop binh thuong. Truoc day fc bi ghi de MOI round (trainer.py:888) nen moi thu client hoc duoc deu bi vut di — do duoc: client acc leo 19->72% trong 5 round trong khi global acc tut 7,89->4,46%.",
   "_comment_memory": "Replay 1% moi lop (herding). Voi lop Benign ~29M mau viec herding 290k buoc chay tren GPU (fp16 GEMV) ~1h, chi 1 lan cuoi task 0",
   "memory_ratio": 0.01,
   "fixed_memory": false,
@@ -82,5 +82,6 @@
   "eval_max_per_class": null,
   "ckpt_every_n_rounds": 1,
   "memory_ckpt_per_client": false,
-  "skip_memory_phase": false
+  "skip_memory_phase": false,
+  "calibrate_once_per_task": true
 }
