@@ -3,7 +3,7 @@
   "dataset": "can_iov",
   "model_name": "afsic-iov",
   "convnet_type": "cnn1d",
-  "_comment_variant": "SESSION TASK 1..4 — LUON chay kem --resume tu checkpoint task 0. lr 3e-5 (task 1 f1 TB10 30,65 va 14/30 round tren f1 30; lr 1e-4 chi 25,65 va 3/30). Neu chay file nay MA KHONG --resume thi task 0 se chay sai lr. KHONG XAP XI: proto_max_samples / quality_eval_max_samples / eval_max_per_class deu null, nen duong cong round-by-round DA LA so tren tap test day du 41,8M mau. ckpt_every_n_rounds=1. CHAM DIEM BANG f1_macro VA acc — KHONG bang rec_macro (xem CACH_CHAY.md muc 1: rec_macro cho diem cao cho dung trang thai hong nhat). adapter_bottleneck da BO: 64 va 128 deu kem mac dinh 16 theo f1_macro. KICH BAN FULL: task 1..4 dung TOAN BO mau lop moi. calibrate_once_per_task=true: prototype CHI ghi de fc MOT LAN luc khoi tao task (dung vai tro khoi tao lop moi); 30 round sau do fc duoc client huan luyen va server gop binh thuong. Truoc day fc bi ghi de MOI round (trainer.py:888) nen moi thu client hoc duoc deu bi vut di — do duoc: client acc leo 19->72% trong 5 round trong khi global acc tut 7,89->4,46%.",
+  "_comment_variant": "SESSION TASK 1..4 - LUON chay kem --resume tu checkpoint task 0 cua afsic-iov-task0.json. Khac ban truoc BON diem: (1) memory_per_class=10000 + force_rebuild_memory=true - replay chia deu theo lop. (2) FSP va proto loss GIO CO TRONG SO LOP (afsic_ids.py): ban cu dung trung binh tron nen trong lo 8192 mau voi 8190 Benign, 2 mau tan cong chi dong gop 0,024% - trong khi hai loss nay chiem lambda 0,5+0,5 = mot nua ham muc tieu. Do la co che sinh ra goc DoS-double 18,4 do va khong gian dac trung hang 2. (3) adapter_bottleneck=64 DAT LAI va calibrate_once_per_task BO DI - tra ve dung hai khoa cua abl_T2_best, luot DUY NHAT trong 21 ablation di het task 1 VA task 2 ma khong sup (rec_macro TB10: task1 32,71 nguong 16,67; task2 37,69 nguong 11,11). (4) proto_max_samples/quality_eval_max_samples bat lai - chi la nut toc do, da do la khong doi mo hinh. CHAM DIEM BANG f1_macro VA acc, KHONG bang rec_macro. eval_max_per_class GIU null.",
   "_comment_memory": "Replay 1% moi lop (herding). Voi lop Benign ~29M mau viec herding 290k buoc chay tren GPU (fp16 GEMV) ~1h, chi 1 lan cuoi task 0",
   "memory_ratio": 0.01,
   "fixed_memory": false,
@@ -77,11 +77,14 @@
   "beta_drift": 0.01,
   "beta_update": 0.01,
   "plastic_source_trainable": true,
-  "proto_max_samples": null,
-  "quality_eval_max_samples": null,
+  "proto_max_samples": 20000,
+  "quality_eval_max_samples": 50000,
   "eval_max_per_class": null,
   "ckpt_every_n_rounds": 1,
   "memory_ckpt_per_client": false,
   "skip_memory_phase": false,
-  "calibrate_once_per_task": true
+  "memory_per_class": 10000,
+  "class_weight_power": 0.5,
+  "force_rebuild_memory": true,
+  "adapter_bottleneck": 64
 }

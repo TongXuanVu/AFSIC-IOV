@@ -150,11 +150,23 @@ class AFSIC_IDS(BaseLearner):
         
         total_samples = class_counts.sum()
         class_weights = torch.zeros(self._total_classes).to(self._device)
+        # Lam diu bang CAN BAC HAI roi chuan hoa mean=1 (theo HFIN/SPCIL).
+        #
+        # Ban cu dung nghich dao tan suat THO: w_c = N/(n_c*K). Ti le w giua
+        # Benign (29M mau) va lop hiem (300 mau) khi do dung bang ti le so
+        # luong = 96.667:1. Hau qua do duoc: trong mot lo 8192 mau co 8190
+        # Benign + 2 mau tan cong, hai mau do ganh ~75% loss cua ca lo -> huong
+        # gradient thuc chat la nhieu tu vai mau, va day la nguon cua trang
+        # thai luong on dinh (task 0 lat o round 21: acc 99,1 -> 0,3).
+        # Can bac hai dua ti le ve 311:1, van chong mat can bang nhung khong
+        # con de mot nhum mau lai ca lo.
+        _smooth = float(self.args.get("class_weight_power", 0.5))
         for c in range(self._total_classes):
             if class_counts[c] > 0:
-                class_weights[c] = total_samples / (class_counts[c] * self._total_classes)
+                class_weights[c] = (total_samples / (class_counts[c] * self._total_classes)) ** _smooth
             else:
                 class_weights[c] = 1.0
+        class_weights = class_weights / class_weights.mean().clamp_min(1e-12)
 
         # Save model params at start of local training round for FedProx
         self.global_model_params_round_start = {
@@ -198,13 +210,24 @@ class AFSIC_IDS(BaseLearner):
                     loss_kd = compute_kd_loss(new_logits, old_logits, T=2.0)
                 
                 # c. FSP Loss (Few-Shot Sparse Pairwise Loss)
-                loss_fsp = compute_fsp_loss(features, targets, proto_matrix, T_fsp=0.5)
+                # CO TRONG SO LOP. Ban cu dung torch.mean tron -> trong lo 8192
+                # mau voi 8190 Benign, hai mau tan cong chi dong gop 0,024%.
+                # FSP keo z ve prototype dung va day khoi prototype gan nhat;
+                # neu 99,6% cap la (Benign, lop-gan-Benign) thi khong bao gio co
+                # ap luc tach DoS khoi double -> chinh la goc 18,4 do do duoc.
+                # Dung lai class_weights da tinh o tren, khong tinh them gi.
+                _w = class_weights[targets]
+                _wsum = _w.sum().clamp_min(1e-12)
+                loss_fsp = (_w * compute_fsp_loss(
+                    features, targets, proto_matrix, T_fsp=0.5, reduction="none"
+                )).sum() / _wsum
                 
-                # d. Prototype Alignment Loss
-                loss_proto = compute_proto_loss(
+                # d. Prototype Alignment Loss (cung co trong so lop, cung ly do)
+                loss_proto = (_w * compute_proto_loss(
                     features, targets, proto_matrix,
                     normalize=self.args.get("proto_loss_normalize", True),
-                )
+                    reduction="none",
+                )).sum() / _wsum
                 
                 # e. Sparse Regularization Loss (L1 norm on adapter and gate parameters)
                 loss_rs = torch.tensor(0.0).to(self._device)

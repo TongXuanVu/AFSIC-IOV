@@ -1,22 +1,27 @@
 import torch
 import torch.nn.functional as F
 
-def compute_proto_loss(features, targets, proto_matrix, normalize=True):
+def compute_proto_loss(features, targets, proto_matrix, normalize=True, reduction="mean"):
     """Prototype Alignment Loss.
 
-    Đặc tả (mục 6):  L_proto = sum ||z_i(x) - p_tilde_{i,y}||^2   trên z GỐC.
+    Dac ta (muc 6):  L_proto = sum ||z_i(x) - p_tilde_{i,y}||^2   tren z GOC.
 
-    normalize=True (mặc định, giữ hành vi cũ):
-        chuẩn hoá z trước khi tính MSE, nên thực chất là 2(1 - cos(z, p)) —
-        cùng hướng tối ưu nhưng THANG GIÁ TRỊ khác đặc tả, tức lambda_proto
-        trong config mang ý nghĩa khác lambda_proto trong công thức của bài.
-        Cách này đồng nhất với phần còn lại của phương pháp (classifier và
-        FSP loss đều dùng cosine).
+    normalize=True (mac dinh, giu hanh vi cu):
+        chuan hoa z truoc khi tinh MSE, nen thuc chat la 2(1 - cos(z, p)) -
+        cung huong toi uu nhung THANG GIA TRI khac dac ta, tuc lambda_proto
+        trong config mang y nghia khac lambda_proto trong cong thuc cua bai.
+        Cach nay dong nhat voi phan con lai cua phuong phap (classifier va
+        FSP loss deu dung cosine).
 
     normalize=False:
-        đúng công thức đặc tả — khoảng cách Euclid bình phương trên z gốc.
-        Nếu dùng thì phải dò lại lambda_proto.
+        dung cong thuc dac ta - khoang cach Euclid binh phuong tren z goc.
+        Neu dung thi phai do lai lambda_proto.
+
+    reduction="none" -> vector [B] loss tung mau, de caller ap TRONG SO LOP
+        (xem ghi chu o compute_fsp_loss). "mean" giu nguyen hanh vi cu.
     """
     z = F.normalize(features, p=2, dim=1) if normalize else features
-    loss_proto = F.mse_loss(z, proto_matrix[targets], reduction="mean")
-    return loss_proto
+    per_sample = F.mse_loss(z, proto_matrix[targets], reduction="none").mean(dim=1)
+    if reduction == "none":
+        return per_sample
+    return per_sample.mean()
