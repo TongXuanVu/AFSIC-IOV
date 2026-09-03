@@ -252,10 +252,23 @@ def _aggregate_client_prototypes(global_model, client_protos, num_clients, args=
     beta_drift = args.get("proto_beta_drift", 0.5)
     beta_upd = args.get("proto_beta_update", 0.2)
     tau_proto = args.get("tau_proto_aggregation", 1.0)
+    # So hang quy mo: CHUAN HOA min-max ve [0,1] giong het cach utils/aggregation.py
+    # xu ly size_term cho Q_i (cung doc khoa size_term_mode).
+    #
+    # Ban cu cong THANG beta_n*log1p(n_ic) trong khi bon so hang con lai deu
+    # trong [0,1]: sigma_ic in [0,1], q_i = alpha ~ 0,01, drift/upd la RMS tren
+    # tham so nen rat nho. Ma log1p(29.000.000) = 17,18 con log1p(365) = 5,90.
+    # Voi tau_proto = 1 thi softmax cho ti so trong so e^11,28 = 79.235 : 1
+    # => "per-class reliability-aware prototype aggregation" thuc chat chi la
+    # "lay prototype cua client nhieu mau nhat cho lop do", bon so hang do tin
+    # cay con lai nam duoi nguong nhieu. Chinh aggregation.py:56-61 da canh bao
+    # dung hien tuong nay cho Q_i va da chuan hoa; nhanh prototype thi quen.
+    proto_size_mode = args.get("size_term_mode", "norm")
 
     for class_id in range(global_model._total_classes):
         active_protos = []
         r_scores = []
+        size_raw = []
         counts = []
         dispersions = []
         qualities = []
@@ -273,7 +286,6 @@ def _aggregate_client_prototypes(global_model, client_protos, num_clients, args=
             upd_i = float(stats.get("update_norm", 0.0))
 
             r_ic = (
-                beta_n * np.log1p(n_ic)
                 - beta_sigma * sigma_ic
                 + beta_q * q_i
                 - beta_drift * drift_i
@@ -281,12 +293,25 @@ def _aggregate_client_prototypes(global_model, client_protos, num_clients, args=
             )
             active_protos.append(info["prototype"])
             r_scores.append(r_ic)
+            size_raw.append(float(np.log1p(n_ic)))
             counts.append(n_ic)
             dispersions.append(sigma_ic)
             qualities.append(q_i)
 
         if not active_protos:
             continue
+
+        # Cong so hang quy mo SAU khi chuan hoa (xem ghi chu o dau ham).
+        if size_raw:
+            if proto_size_mode == "norm" and len(size_raw) > 1:
+                _lo, _hi = min(size_raw), max(size_raw)
+                _rng = (_hi - _lo) or 1.0
+                size_terms = [(v - _lo) / _rng for v in size_raw]
+            elif proto_size_mode == "norm":
+                size_terms = [1.0 for _ in size_raw]
+            else:                      # "raw" — hanh vi cu, chi de tai lap
+                size_terms = size_raw
+            r_scores = [r + beta_n * st for r, st in zip(r_scores, size_terms)]
 
         stacked = torch.stack(active_protos).float()
         w_tensor = torch.softmax(
