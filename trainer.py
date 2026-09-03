@@ -1382,22 +1382,106 @@ def save_combined_plot(x_vals, y_mic, y_mac, y_wei, category_name, args):
     plt.close()
 
 
+TEN_LOP_CAN_IOV = [
+    "Benign", "DoS", "double", "force-neutral", "fuzzing", "interval",
+    "rpm", "rpm-accessory", "speed", "speed-accessory", "standstill",
+    "systematic", "triple",
+]
+
+
+def _luu_confusion_csv(cm, ten_lop, csv_path):
+    """Ghi ma tran nham lan ra CSV: SO MAU tuyet doi + ti le theo hang.
+
+    Vi sao can CSV: tap test co 99,62% Benign nen o PNG, thang mau bi mot o
+    41,7 trieu mau chiem het — moi o lop tan cong (co 10^2..10^5 mau) deu ve ra
+    trang, khong doc duoc gi. So tuyet doi thi khong bi vay.
+
+    File co hai khoi:
+      [1] SO MAU        cm[i][j] = so mau lop THAT i duoc doan thanh j
+                        + cot Tong_that, Dung, Recall_%
+      [2] TI LE % THEO HANG  = cm[i][j] / tong hang i * 100
+    Va mot khoi [3] tom tat theo lop: Precision / Recall / F1 / support.
+    """
+    import csv as _csv
+    K = len(ten_lop)
+    tong_that = cm.sum(axis=1)
+    tong_doan = cm.sum(axis=0)
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        w = _csv.writer(f)
+
+        w.writerow(["[1] SO MAU — hang = nhan THAT, cot = nhan DOAN"])
+        w.writerow(["That \\ Doan"] + ten_lop + ["Tong_that", "Dung", "Recall_%"])
+        for i in range(K):
+            rec = 100.0 * cm[i][i] / tong_that[i] if tong_that[i] else 0.0
+            w.writerow([ten_lop[i]] + [int(cm[i][j]) for j in range(K)]
+                       + [int(tong_that[i]), int(cm[i][i]), f"{rec:.4f}"])
+        w.writerow(["Tong_doan"] + [int(tong_doan[j]) for j in range(K)]
+                   + [int(cm.sum()), int(np.trace(cm)),
+                      f"{100.0 * np.trace(cm) / cm.sum():.4f}" if cm.sum() else "0"])
+
+        w.writerow([])
+        w.writerow(["[2] TI LE % THEO HANG (moi hang cong lai = 100)"])
+        w.writerow(["That \\ Doan"] + ten_lop)
+        for i in range(K):
+            t = tong_that[i]
+            w.writerow([ten_lop[i]] + [f"{100.0 * cm[i][j] / t:.4f}" if t else "0"
+                                       for j in range(K)])
+
+        w.writerow([])
+        w.writerow(["[3] TUNG LOP"])
+        w.writerow(["Lop", "So_mau_that", "So_lan_duoc_doan", "TP",
+                    "Precision_%", "Recall_%", "F1_%"])
+        for i in range(K):
+            tp = int(cm[i][i])
+            p = 100.0 * tp / tong_doan[i] if tong_doan[i] else 0.0
+            r = 100.0 * tp / tong_that[i] if tong_that[i] else 0.0
+            f1 = 2 * p * r / (p + r) if (p + r) else 0.0
+            w.writerow([ten_lop[i], int(tong_that[i]), int(tong_doan[i]), tp,
+                        f"{p:.4f}", f"{r:.4f}", f"{f1:.4f}"])
+
+
 def plot_confusion_matrix(y_true, y_pred, task_id, run_dir):
-    """Ve va luu Confusion Matrix PNG"""
+    """Ve Confusion Matrix ra PNG va CSV."""
     # y_pred thuong co dang [N, topk], lay top1
     if len(y_pred.shape) > 1 and y_pred.shape[1] > 1:
         y_pred_top1 = y_pred[:, 0]
     else:
         y_pred_top1 = y_pred.flatten()
-        
-    cm = confusion_matrix(y_true, y_pred_top1)
-    plt.figure(figsize=(12, 10))
-    sns.heatmap(cm, annot=False, fmt='d', cmap='Blues')
+
+    y_true = np.asarray(y_true).ravel()
+    y_pred_top1 = np.asarray(y_pred_top1).ravel()
+
+    # labels= TUONG MINH: khong co no thi sklearn suy tap nhan tu
+    # union(y_true, y_pred), nen mot lop da hoc ma vang mat o CA hai phia se
+    # lam ma tran CO LAI va moi nhan truc sau no bi dich di 1 — sai am tham.
+    K = int(max(int(y_true.max()) if y_true.size else 0,
+                int(y_pred_top1.max()) if y_pred_top1.size else 0) + 1)
+    labels = list(range(K))
+    ten_lop = [TEN_LOP_CAN_IOV[i] if i < len(TEN_LOP_CAN_IOV) else str(i)
+               for i in labels]
+    cm = confusion_matrix(y_true, y_pred_top1, labels=labels)
+
+    csv_path = os.path.join(run_dir, f'confusion_matrix_task_{task_id:02d}.csv')
+    _luu_confusion_csv(cm, ten_lop, csv_path)
+
+    # PNG: thang mau LOG + in so vao o. Voi 41,7 trieu Benign va vai tram mau
+    # lop hiem, thang tuyen tinh lam moi o tan cong deu ve ra trang.
+    from matplotlib.colors import LogNorm
+    plt.figure(figsize=(1.15 * K + 5, 1.0 * K + 4))
+    sns.heatmap(
+        cm, annot=True, fmt='d', cmap='Blues', linewidths=.5, linecolor='#dddddd',
+        norm=LogNorm(vmin=max(1, cm[cm > 0].min()) if (cm > 0).any() else 1,
+                     vmax=max(1, cm.max())),
+        xticklabels=ten_lop, yticklabels=ten_lop,
+        annot_kws={"size": 7},
+    )
     plt.xlabel('Predicted Label')
     plt.ylabel('True Label')
-    plt.title(f'Confusion Matrix - Task {task_id}')
-    
+    plt.title(f'Confusion Matrix - Task {task_id}  (thang mau LOG)')
+    plt.xticks(rotation=45, ha='right'); plt.yticks(rotation=0)
+
     save_path = os.path.join(run_dir, f'confusion_matrix_task_{task_id:02d}.png')
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
-    logging.info(f'[TEST] Da luu Confusion Matrix tai: {save_path}')
+    logging.info(f'[TEST] Da luu Confusion Matrix: {save_path}')
+    logging.info(f'[TEST] Da luu Confusion Matrix CSV: {csv_path}')

@@ -64,6 +64,14 @@ def main():
     model = factory.get_model(args["model_name"], args)
     for _ in range(task + 1):
         model.incremental_train(dm, skip_train=True)
+        # BAT BUOC: _known_classes chi tang trong after_task(), con
+        # get_task_size(t) tra ve increments[t] (KHONG luy tich). Thieu dong nay
+        # thi _total_classes dung im o 3 qua moi vong lap, nen tu task 1 tro di
+        # fc chi co 3 dau ra trong khi checkpoint co 6/9/11/13 -> load_state_dict
+        # nem RuntimeError size mismatch (va tu task 3 thi sap ngay trong
+        # update_fc vi increments[3]=2 < 3). Duong train khong dinh loi nay vi
+        # trainer.py goi after_task() cuoi moi task.
+        model.after_task()
     try:
         model._network.load_state_dict(state["model_state_dict"])
     except RuntimeError as e:
@@ -123,14 +131,12 @@ def main():
     print(classification_report(y_true, y_pred_top1, labels=list(range(K)),
                                 target_names=ten, digits=4, zero_division=0))
 
-    if a.csv:
-        import csv as _csv
-        with open(a.csv, "w", newline="", encoding="utf-8") as f:
-            wr = _csv.writer(f)
-            wr.writerow(["that\\doan"] + ten)
-            for i, t in enumerate(ten):
-                wr.writerow([t] + [int(x) for x in cm[i]])
-        print(f"\nDa ghi {a.csv}")
+    # CSV: mac dinh ghi canh checkpoint neu khong truyen --csv.
+    csv_path = a.csv or os.path.join(
+        os.path.dirname(os.path.abspath(a.ckpt)),
+        f"confusion_task{task:02d}_r{state.get('round', 0) + 1:03d}.csv")
+    T._luu_confusion_csv(cm, ten, csv_path)      # dung CHUNG ham voi trainer.py
+    print(f"\nDa ghi CSV: {csv_path}")
 
 
 if __name__ == "__main__":
