@@ -512,6 +512,7 @@ def _train_federated(args):
     # chạy thí nghiệm ablation ngắn trên task 0 mà không đụng tới dữ liệu hay
     # task_increments (vốn bắt buộc phải cộng đủ số lớp).
     _max_tasks = args.get("max_tasks")
+    _nb_tasks_full = nb_tasks          # so task THAT SU cua chuong trinh hoc
     if _max_tasks:
         nb_tasks = min(nb_tasks, int(_max_tasks))
         logging.info(f"max_tasks={_max_tasks} -> chi chay {nb_tasks} task dau")
@@ -1080,8 +1081,16 @@ def _train_federated(args):
         # (max_tasks, hoac task cuoi that su) no khong bao gio duoc doc.
         # Voi ablation task 0 thi day la 40% thoi gian va toan bo dung luong,
         # tieu vao thu khong ai dung.
-        _het_task = (task >= nb_tasks - 1)
-        if args.get("skip_memory_phase", False) or (_het_task and args.get("max_tasks")):
+        # CHI bo qua pha memory khi day la task CUOI CUNG CUA CHUONG TRINH HOC
+        # (task 4) — luc do khong con task sau nao doc bo nho nua.
+        #
+        # Ban cu dung (task >= nb_tasks - 1) voi nb_tasks DA bi max_tasks thu
+        # nho, nen mot config kieu "chi chay task 0 roi ban giao checkpoint cho
+        # session sau" (afsic-iov-task0.json, max_tasks=1) se bi bo qua pha
+        # memory va KHONG sinh ra ckpt_task00_memory_client99.pth — dung file ma
+        # session task 1..4 can de resume.
+        _het_chuong_trinh = (task >= _nb_tasks_full - 1)
+        if args.get("skip_memory_phase", False) or _het_chuong_trinh:
             logging.info(
                 f"BO QUA pha Rehearsal Memory o task {task} (task cuoi duoc chay) "
                 f"— tiet kiem ~2 gio va ~6,6 GB. Dat skip_memory_phase=false neu "
