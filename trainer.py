@@ -921,7 +921,28 @@ def _train_federated(args):
                     global_weights = average_weights(client_weights)
                     global_model._network.load_state_dict(global_weights)
 
-            # ── Đánh giá Global Model cuối MỖI ROUND ──
+            # ── Đánh giá Global Model ──
+            #
+            # eval_every_n_rounds: 1 = moi round (MAC DINH, hanh vi cu).
+            # [DO] tren log 04-09, task 2 vong 28: huan luyen ca 100 client het
+            # 33 giay, danh gia tap test 41,9 trieu mau het 3 phut 08 — tuc 84%
+            # thoi gian mot round la danh gia. Voi kich ban 10shot/1percent
+            # (phan huan luyen con nho hon nua) thi gan nhu toan bo thoi gian
+            # chay la danh gia.
+            #
+            # Bang ket qua chi can SO CUOI MOI TASK, nen dat 5 lam run nhanh
+            # ~3 lan. LUON danh gia round DAU (de doc chi bao som trong luc
+            # chay) va round CUOI cua task (do chinh la so di vao bang).
+            #
+            # Doi lai: duong cong round-by-round thua hon, va avg_acc chi con
+            # trung binh tren cac round CO danh gia.
+            _eve = max(1, int(args.get("eval_every_n_rounds", 1)))
+            if not (_eve == 1
+                    or round_idx == 0
+                    or (round_idx + 1) % _eve == 0
+                    or round_idx == args["num_rounds"] - 1):
+                continue
+
             global_model.test_loader = _build_global_learned_test_loader(
                 client_dms[0],
                 global_model._total_classes,
