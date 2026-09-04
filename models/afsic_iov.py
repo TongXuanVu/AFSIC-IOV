@@ -93,6 +93,14 @@ class AFSIC_IoV(AFSIC_IDS):
         """p̃_{i,c} = ρ·p_local + (1−ρ)·p_global, chuẩn hóa L2."""
         global_p = self.global_proto_memory.get_prototype(class_id)
         local_p = self.local_protos.get(class_id, {}).get("prototype")
+        # CHAN LECH CHIEU: voi expand_feature_space, feature_dim no sau moi task
+        # nen mot trong hai ve co the con o so chieu CU. Loai ve lech truoc khi tron.
+        _d = getattr(self._network, "feature_dim", None)
+        if _d is not None:
+            if local_p is not None and local_p.numel() != _d:
+                local_p = None
+            if global_p is not None and global_p.numel() != _d:
+                global_p = None
         if local_p is None:
             return global_p
         if global_p is None:

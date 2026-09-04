@@ -382,7 +382,11 @@ def _calibrate_classifier_from_prototypes(model, is_task_init=False):
         prototypes = model.get_calibration_prototypes()
     else:
         prototypes = model.global_proto_memory.get_all_prototypes()
-    if model.args.get("calibrate_new_classes_only", False) and not is_task_init:
+    # LUU Y: dieu kien cu la `... and not is_task_init`, tuc co nay bi VO HIEU
+    # dung o lan goi duy nhat co y nghia (khoi tao task). Bo ve dung y nghia:
+    # bat co -> chi ghi de trong so cua cac lop MOI, giu nguyen phan lop cu ma
+    # cac task truoc da hoc.
+    if model.args.get("calibrate_new_classes_only", False):
         class_ids = range(model._known_classes, model._total_classes)
     else:
         class_ids = range(model._total_classes)

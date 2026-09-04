@@ -179,7 +179,11 @@ class AFSIC_IDS(BaseLearner):
         proto_matrix = torch.zeros(self._total_classes, self._network.feature_dim).to(self._device)
         for c in range(self._total_classes):
             proto = self._get_reference_prototype(c)
-            if proto is not None:
+            # CHAN LECH CHIEU: khi expand_feature_space bat, feature_dim no sau
+            # moi task. Prototype con sot lai tu task truoc co so chieu CU nen
+            # phep gan se no. Lech chieu thi bo qua, dung fallback trong so
+            # classifier ben duoi.
+            if proto is not None and proto.numel() == self._network.feature_dim:
                 proto_matrix[c] = proto.to(self._device)
             else:
                 # fallback to normalized classifier weight

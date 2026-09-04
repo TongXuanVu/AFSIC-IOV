@@ -83,5 +83,9 @@
   "class_weight_power": 0.5,
   "force_rebuild_memory": true,
   "adapter_bottleneck": 64,
-  "proto_rho_mode": "share"
+  "proto_rho_mode": "share",
+  "calibrate_once_per_task": true,
+  "calibrate_new_classes_only": true,
+  "expand_feature_space": true,
+  "_comment_sua_hai_tang": "SUA HAI TANG (tim ra tu log 03-09-26_17-21). TANG 1 — dau phan loai bi reset moi vong: _calibrate_classifier_from_prototypes chay sau MOI lan gop (trainer.py:914) chu khong phai moi task, nen fc.weight = ma tran prototype o moi vong; moi thu fc hoc duoc va moi thu khau gop lam voi fc deu bi vut bo. Do la ly do loss phang o 1,7846 suot 13 vong roi task 1 lat tu acc 86,29 (f1_mac 20,98) xuong acc 0,92 (f1_mac 2,87) o vong 14 va khong bao gio hoi. calibrate_once_per_task=true -> prototype chi con dung de KHOI TAO dau task. calibrate_new_classes_only=true + bo `and not is_task_init` o trainer.py -> dau task chi ghi de trong so cac lop MOI, giu nguyen phan lop cu da hoc. TANG 2 — khong gian dac trung khong no: convs/cnn1d.py out_dim=64 co dinh cho ca 5 task/13 lop, moi task sau chi them mot adapter bottleneck 64->64->64 tron vao CUNG 64 chieu do. Do la ly do prototype dau task 1 co cos(w_i,w_j)=0,9917. expand_feature_space=true -> doi phep hop nhat tu to hop loi sang NOI, feature_dim 64->128->192->256->320 (dung day so DER cua HFIN), nhanh plasticity doc du lieu THO thay vi 64 con so dau ra cua nhanh stability. Checkpoint task 0 van dung duoc (task 0 khong co nhanh nao); checkpoint task>=1 cu KHONG con tuong thich."
 }
