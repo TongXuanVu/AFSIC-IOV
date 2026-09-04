@@ -962,9 +962,17 @@ def _train_federated(args):
                 forgetting_vals.append(max(0.0, best_accs[best_key] - curr_acc))
             mean_forgetting = sum(forgetting_vals) / len(forgetting_vals) if forgetting_vals else 0.0
 
+            # f1_mac IN THANG RA STDOUT kem nguong doan-mot-lop (99,7/K).
+            # Truoc day f1_macro chi nam trong CSV, ma tren Kaggle khong doc
+            # duoc CSV trong luc cell dang chay -> muon xem phai ngat run.
+            # Do la chi so DUY NHAT dung de cham diem nen phai thay ngay.
+            _K = max(1, int(global_model._total_classes))
+            _f1m = float(cnn_accy.get("f1_macro", 0))
+            _san = 99.7 / _K
             logging.info(
                 f"[Task {task} | Round {round_idx+1}] "
                 f"Acc: {cnn_accy['top1']:.2f}% | "
+                f"f1_mac: {_f1m:.2f} (san {_san:.2f} -> {'VUOT' if _f1m > _san else 'DUOI'}) | "
                 f"Old Acc: {cnn_accy.get('grouped', {}).get('old_acc', 0):.2f}% | "
                 f"New Acc: {cnn_accy.get('grouped', {}).get('new_acc', 0):.2f}% | "
                 f"Forgetting: {mean_forgetting:.2f}% | "
