@@ -114,7 +114,7 @@ def _build_fewshot_train_dataset(data_manager, local_model, args, task, client_i
     memory = local_model._get_memory()
     if memory is not None and len(memory) != 0:
         mem_data, mem_targets = memory
-        # ── Balanced replay HAI CHIEU (replay_old_ratio) ──────────────────────
+        # ── Balanced replay MOT CHIEU: chi nhan ban len (replay_old_ratio) ────
         #
         # Ban goc noi exemplar DUNG MOT LAN, khong can ti le, nen ti le cu/moi
         # troi tu do theo tung task. [DO] tren log:
