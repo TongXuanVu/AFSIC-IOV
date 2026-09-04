@@ -114,6 +114,38 @@ def _build_fewshot_train_dataset(data_manager, local_model, args, task, client_i
     memory = local_model._get_memory()
     if memory is not None and len(memory) != 0:
         mem_data, mem_targets = memory
+        # ── Balanced replay HAI CHIEU (replay_old_ratio) ──────────────────────
+        #
+        # Ban goc noi exemplar DUNG MOT LAN, khong can ti le, nen ti le cu/moi
+        # troi tu do theo tung task. [DO] tren log:
+        #   task 1, client khong lo: ~10.000 exemplar / hang tram nghin mau moi
+        #                            -> lop cu ~1%   -> Benign chet
+        #   task 2, client 0:        14.377 exemplar / 1.546 mau moi
+        #                            -> lop cu 90,3% -> New Acc 0,00%
+        #
+        # HFIN (edge_server.py:286) ghim ti le nay o 20:80 nhung CHI MOT CHIEU:
+        #     if num_old > 0 and num_new > num_old:   # chi nhan ban LEN
+        # Luat do gia dinh du lieu lop moi doi dao. Tren CAN-IoV thi nguoc lai —
+        # cac lop moi hiem toi muc o task >= 2 chinh REPLAY moi la ben ap dao,
+        # nen dieu kien cua HFIN khong bao gio kich hoat va lop moi bi chet chim.
+        #
+        # CHI NHAN BAN LEN, khong bao gio cat bot — giong HFIN.
+        # Ban dau toi dinh ghim hai chieu (cat bot khi lop cu > 20%) nhung do
+        # thu thi thay no pha tap huan luyen: task 2 client 4 co 55 mau moi,
+        # cat replay ve 20% con 13 mau -> ca tap chi con 68 mau; kich ban
+        # 10shot con te hon, 30 mau moi -> replay con 7 -> tong 37 mau. Client
+        # gan nhu khong hoc duoc gi va lop cu mat hoan toan rehearsal. Chieu
+        # nguoc lai (lop cu qua NHIEU) phai xu ly o khau gop (beta_acc), khong
+        # phai bang cach vut bo replay.
+        _r = float(args.get("replay_old_ratio", 0.0))
+        _n_mem = len(mem_targets)
+        if 0.0 < _r < 1.0 and new_count > 0 and _n_mem > 0:
+            target_old = int(new_count * _r / (1.0 - _r))
+            if target_old > _n_mem:
+                rep = int(min(max(1, target_old // _n_mem), 50))
+                if rep > 1:
+                    mem_data = np.concatenate([mem_data] * rep, axis=0)
+                    mem_targets = np.concatenate([mem_targets] * rep, axis=0)
         data_parts.append(mem_data)
         target_parts.append(mem_targets)
 
