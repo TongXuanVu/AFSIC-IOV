@@ -425,6 +425,43 @@ def _calibrate_classifier_from_prototypes(model, is_task_init=False):
     model._network.init_new_class_weights_from_prototypes(prototypes, class_ids)
 
 
+_MEMORY_STATE_KEYS = ("data_memory", "targets_memory", "local_memory")
+
+
+def _split_client_states(local_models, num_clients):
+    """Tach state cua client thanh HAI phan: trong so mang, va bo nho exemplar.
+
+    VI SAO TACH: trong suot 30 vong cua mot task, exemplar KHONG HE thay doi —
+    no chi duoc dung lai o pha memory cuoi task. Nhung checkpoint moi vong lai
+    dang cong ca hai. [DO] file 67 MB moi vong, 30 vong x 4 task = ~8 GB, trong
+    do phan exemplar (628.345 mau x 31 dac trung, hoac 976.717 o che do 1%) la
+    bat bien va duoc ghi lai 120 lan y het nhau.
+
+    Tach ra con cho phep DUNG LAI bo nho giua cac lan chay: herding tren lop
+    Benign ~29 trieu mau la khau dat nhat cua ca chuong trinh (22 phut o che do
+    memory_per_class=10.000; o che do 1% cac client lon chay ~12 lan nhieu buoc
+    hon). Co file rieng thi chi phai tra gia do MOT lan.
+    """
+    nets, mems = [], []
+    for c in range(num_clients):
+        m = local_models[c]
+        nets.append({
+            # Trong so mang rieng cua client. Bat buoc phai luu: nhanh ca nhan
+            # hoa (stability_encoder / plasticity_adapter / gate) nam trong
+            # _PERSONALIZED_KEY_MARKERS nen KHONG bao gio duoc nap de tu global
+            # o task >= 1. Thieu no, resume giua chung se de client chay tiep
+            # voi nhanh ca nhan hoa khoi tao ngau nhien (loss round 1 task 1
+            # nhay 1.6 -> 3.3).
+            'net': {k: v.cpu() for k, v in m._network.state_dict().items()},
+        })
+        mems.append({
+            'data_memory': getattr(m, '_data_memory', None),
+            'targets_memory': getattr(m, '_targets_memory', None),
+            'local_memory': getattr(m, 'local_memory', None),
+        })
+    return nets, mems
+
+
 _PERSONALIZED_KEY_MARKERS = ("stability_encoder", "plasticity_adapter", "gate")
 
 
@@ -582,7 +619,28 @@ def _train_federated(args):
                     start_round = args["num_rounds"]
         else:
             raise FileNotFoundError(f"Checkpoint file not found: {args['resume']}")
-            
+
+    # ── Nap bo nho exemplar tu FILE RIENG (--resume_memory) ─────────────────
+    #
+    # Tu ban tach file, checkpoint model KHONG con chua exemplar (has_memory=False).
+    # Bo nho nam o *_MEM.pth va nap qua day. Cho phep:
+    #   - dung lai mot bo exemplar cho NHIEU lan chay khac nhau (khoi herding lai)
+    #   - ghep bo exemplar co dinh voi cac model task 0 khac nhau (buffer co dinh
+    #     giua cac arm, loai bo mot bien nhieu khi so sanh)
+    # Checkpoint dinh dang CU (co exemplar nam chung) van nap duoc binh thuong.
+    memory_ckpt = None
+    if args.get("resume_memory"):
+        if os.path.isfile(args["resume_memory"]):
+            memory_ckpt = torch.load(args["resume_memory"], map_location='cpu', weights_only=False)
+            logging.info(
+                f"==> Nap bo nho exemplar tu file rieng: {args['resume_memory']} "
+                f"(task {memory_ckpt.get('task')}, last_client_done "
+                f"{memory_ckpt.get('last_client_done')}, memory_per_class "
+                f"{memory_ckpt.get('memory_per_class')}, memory_ratio "
+                f"{memory_ckpt.get('memory_ratio')})")
+        else:
+            raise FileNotFoundError(f"Memory checkpoint not found: {args['resume_memory']}")
+
     for task in range(nb_tasks):
         # Save previous global network BEFORE expansion. AFSIC KD needs this old model.
         prev_global_network = copy.deepcopy(global_model._network) if _is_afsic(args) and task > 0 else None
@@ -602,12 +660,27 @@ def _train_federated(args):
             if _is_afsic(args) and checkpoint.get('global_proto_memory') is not None:
                 global_model.global_proto_memory = checkpoint['global_proto_memory']
             _restored_net = 0
+            # Nguon bo nho: file _MEM.pth neu co, nguoc lai lay trong chinh
+            # checkpoint model (dinh dang cu, has_memory khong phai False).
+            _mem_src = None
+            if memory_ckpt is not None and memory_ckpt.get('task') == task:
+                _mem_src = memory_ckpt['client_states']
+            elif checkpoint.get('has_memory', True):
+                _mem_src = checkpoint['client_states']
+            if _mem_src is None and task > 0:
+                logging.warning(
+                    "KHONG CO NGUON BO NHO EXEMPLAR cho task %d. Checkpoint model "
+                    "khong chua exemplar (has_memory=False) va khong truyen "
+                    "--resume_memory. Client se train KHONG CO REPLAY o task nay — "
+                    "kiem tra lai lenh chay truoc khi de no tiep tuc.", task)
             for c in range(args["num_clients"]):
                 c_state = checkpoint['client_states'][c]
-                local_models[c]._data_memory = c_state.get('data_memory')
-                local_models[c]._targets_memory = c_state.get('targets_memory')
-                if _is_afsic(args) and c_state.get('local_memory') is not None:
-                    local_models[c].local_memory = c_state['local_memory']
+                if _mem_src is not None:
+                    m_state = _mem_src[c]
+                    local_models[c]._data_memory = m_state.get('data_memory')
+                    local_models[c]._targets_memory = m_state.get('targets_memory')
+                    if _is_afsic(args) and m_state.get('local_memory') is not None:
+                        local_models[c].local_memory = m_state['local_memory']
                 # Phục hồi nhánh cá nhân hóa của client (xem chú thích ở chỗ lưu).
                 if c_state.get('net') is not None:
                     try:
@@ -1109,20 +1182,10 @@ def _train_federated(args):
             # task 0 thi khong ai resume tu day ca.
             _cke = args.get("ckpt_every_n_rounds", 1)
             if _cke and (round_idx + 1) % int(_cke) == 0:
-              client_states = []
-              for c in range(args["num_clients"]):
-                client_states.append({
-                    'data_memory': getattr(local_models[c], '_data_memory', None),
-                    'targets_memory': getattr(local_models[c], '_targets_memory', None),
-                    'local_memory': getattr(local_models[c], 'local_memory', None),
-                    # Trọng số mạng riêng của client. Bắt buộc phải lưu: nhánh
-                    # cá nhân hóa (stability_encoder / plasticity_adapter / gate)
-                    # nằm trong _PERSONALIZED_KEY_MARKERS nên KHÔNG bao giờ được
-                    # nạp đè từ global ở task >= 1. Thiếu nó, resume giữa chừng
-                    # sẽ để client chạy tiếp với nhánh cá nhân hóa khởi tạo
-                    # ngẫu nhiên (loss round 1 task 1 nhảy 1.6 -> 3.3).
-                    'net': {k: v.cpu() for k, v in local_models[c]._network.state_dict().items()},
-                })
+              # KHONG kem exemplar: trong 30 vong cua mot task no bat bien, ghi
+              # lai moi vong chi lam file phinh tu ~15 MB len ~67 MB. Bo nho nam
+              # o file *_MEM.pth rieng, sinh o pha memory cuoi task.
+              client_states, _ = _split_client_states(local_models, args["num_clients"])
               ckpt_name = f'ckpt_round{global_round+1:04d}_task{task:02d}_r{round_idx+1:03d}_acc{cnn_accy["top1"]:.1f}.pth'
               torch.save({
                 'task': task,
@@ -1131,6 +1194,7 @@ def _train_federated(args):
                 'model_state_dict': global_model._network.state_dict(),
                 'known_classes': global_model._known_classes,
                 'client_states': client_states,
+                'has_memory': False,
                 'global_proto_memory': getattr(global_model, 'global_proto_memory', None),
                 'metrics': cnn_accy
               }, os.path.join(ckpt_dir, ckpt_name))
@@ -1167,6 +1231,15 @@ def _train_federated(args):
 
         logging.info(f"Xây dựng Rehearsal Memory cho các Clients tại cuối Task {task}...")
         current_client_start = checkpoint.get('last_client_done', -1) + 1 if (checkpoint is not None and task == checkpoint['task']) else 0
+        # File _MEM rieng cung dem theo last_client_done: neu no da du 100 client
+        # cho dung task nay thi khong phai herding lai gi ca.
+        if memory_ckpt is not None and memory_ckpt.get('task') == task:
+            _mem_done = int(memory_ckpt.get('last_client_done', -1)) + 1
+            if _mem_done > current_client_start:
+                current_client_start = _mem_done
+                logging.info(
+                    f"Bo nho exemplar da nap tu file rieng cho {_mem_done}/"
+                    f"{args['num_clients']} client -> bo qua herding tuong ung.")
         # force_rebuild_memory: dung lai bo nho exemplar tu dau du checkpoint bao
         # da xong (last_client_done=99). Can khi DOI CHINH SACH replay
         # (memory_ratio -> memory_size chia deu) ma khong muon chay lai ca task 0.
@@ -1197,28 +1270,39 @@ def _train_federated(args):
                 # Voi lan chay xac nhan 5 task: tiet kiem ~4 gio, gan mot session.
                 _mem_ck = args.get("memory_ckpt_per_client", True)
                 if _mem_ck or c == args["num_clients"] - 1:
-                  client_states = []
-                  for state_c in range(args["num_clients"]):
-                    client_states.append({
-                        'data_memory': getattr(local_models[state_c], '_data_memory', None),
-                        'targets_memory': getattr(local_models[state_c], '_targets_memory', None),
-                        'local_memory': getattr(local_models[state_c], 'local_memory', None),
-                        'net': {k: v.cpu() for k, v in local_models[state_c]._network.state_dict().items()},
-                    })
-                    
+                  # Ghi HAI file rieng:
+                  #   ckpt_task{t}_memory_client{c}.pth        model + trong so client  (~15 MB)
+                  #   ckpt_task{t}_memory_client{c}_MEM.pth    exemplar               (~80-120 MB)
+                  # File _MEM la thu dat nhat de tao ra (herding tren Benign) va la
+                  # thu DUY NHAT can mang sang cac lan chay sau, nen tach ra de
+                  # nap lai bang --resume_memory ma khong keo theo model cu.
+                  client_states, memory_states = _split_client_states(local_models, args["num_clients"])
+                  _gr = checkpoint['global_round'] if (checkpoint is not None and 'global_round' in checkpoint) else (task * args["num_rounds"] + args["num_rounds"] - 1)
+
                   ckpt_name = f'ckpt_task{task:02d}_memory_client{c:02d}.pth'
                   torch.save({
                     'task': task,
                     'round': args["num_rounds"] - 1,
-                    'global_round': checkpoint['global_round'] if (checkpoint is not None and 'global_round' in checkpoint) else (task * args["num_rounds"] + args["num_rounds"] - 1),
+                    'global_round': _gr,
                     'is_memory_phase': True,
                     'last_client_done': c,
                     'model_state_dict': global_model._network.state_dict(),
                     'client_states': client_states,
+                    'has_memory': False,
                     'known_classes': global_model._known_classes,
                     'global_proto_memory': getattr(global_model, 'global_proto_memory', None)
                   }, os.path.join(ckpt_dir, ckpt_name))
-                  logging.info(f"Da luu Checkpoint Memory (client {c})")
+
+                  mem_name = f'ckpt_task{task:02d}_memory_client{c:02d}_MEM.pth'
+                  torch.save({
+                    'task': task,
+                    'last_client_done': c,
+                    'num_clients': args["num_clients"],
+                    'memory_per_class': args.get("memory_per_class"),
+                    'memory_ratio': args.get("memory_ratio"),
+                    'client_states': memory_states,
+                  }, os.path.join(ckpt_dir, mem_name))
+                  logging.info(f"Da luu Checkpoint Memory (client {c}) -> {ckpt_name} + {mem_name}")
                 
             local_models[c].after_task()
 

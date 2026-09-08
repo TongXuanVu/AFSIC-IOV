@@ -25,6 +25,11 @@ def setup_parser():
                         help='Che do debug: giam so epoch xuong 2 de test nhanh.')
     parser.add_argument('--resume', type=str, default='',
                         help='Duong dan den checkpoint (.pth) de tiep tuc training.')
+    parser.add_argument('--resume_memory', type=str, default='',
+                        help=('Duong dan den file bo nho exemplar rieng (*_MEM.pth). '
+                              'Tu ban tach file, checkpoint model khong con chua exemplar. '
+                              'Dung lai mot file _MEM cho nhieu lan chay se bo qua han pha '
+                              'herding — khau dat nhat cua chuong trinh.'))
     parser.add_argument('--memory_size', type=int, default=None,
                         help='Tong so luong mau luu trong bo nho dem (Exemplar memory).')
     parser.add_argument('--batch_size', type=int, default=None,
