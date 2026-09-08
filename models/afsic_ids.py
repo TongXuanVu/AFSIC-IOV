@@ -243,10 +243,35 @@ class AFSIC_IDS(BaseLearner):
                 if self._cur_task > 0:
                     loss_prox = compute_fedprox_regularization(self._network, self.global_model_params_round_start, self._device)
                 
-                # Hyperparameters. Base stage should use CE only; prototype losses
-                # are meaningful after old-class prototypes exist.
+                # Hyperparameters.
+                #
+                # task0_enable_proto_losses (mac dinh false = hanh vi cu): o task 0
+                # FSP va proto loss bi tat hoan toan, nen CE co trong so lop la co
+                # che chong mat can bang DUY NHAT o do.
+                #
+                # [DO] hau qua tren CAN-IoV, confusion task 0:
+                #   Benign  F1 99,83      DoS  F1 36,70 (recall 23,96%)
+                #   double  F1  0,00  — doan 5.650 lan, dung 0 lan
+                # Goc giua cac vector phan loai (fc.weight == prototype o task 0):
+                #   Benign-DoS 131,97 do | DoS-double 94,68 do | Benign-double 47,06 do
+                # Prototype `double` nam gan tam dam may dac trung hon ca DoS, nen
+                # mau Benign o ria bi gan `double` con mau `double` that luon thua
+                # Benign. FSP loss chinh la luc keo z ve prototype cua no va DAY khoi
+                # prototype gan nhat — dung co che can de tach hai lop do — va no
+                # dang khong chay o task quyet dinh (toan bo khoi luong F1 cua AFSIC
+                # deu sinh ra o task 0 roi giu nguyen: 137/137/136 qua task 0/1/2).
+                #
+                # Bat co nay CHI mo lambda_fsp va lambda_proto. lambda_kd, lambda_rs
+                # va lambda_prox van = 0 vi o task 0 ba loss do bang 0 ve mat cau
+                # truc: _old_network la None, con loss_rs/loss_prox nam trong nhanh
+                # `if self._cur_task > 0`.
                 if self._cur_task == 0:
-                    lambda_kd = lambda_fsp = lambda_proto = lambda_rs = lambda_prox = 0.0
+                    lambda_kd = lambda_rs = lambda_prox = 0.0
+                    if self.args.get("task0_enable_proto_losses", False):
+                        lambda_fsp = self.args.get("lambda_fsp", 0.5)
+                        lambda_proto = self.args.get("lambda_proto", 0.5)
+                    else:
+                        lambda_fsp = lambda_proto = 0.0
                 else:
                     lambda_kd = self.args.get("lambda_kd", 1.0)
                     lambda_fsp = self.args.get("lambda_fsp", 0.5)
