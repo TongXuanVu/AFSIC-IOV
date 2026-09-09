@@ -152,6 +152,23 @@ class BaseLearner(object):
     # SO MAU HUAN LUYEN toan lien doan (class_prior_counts), khong dung bat ky
     # thong ke nao cua tap test.
     def _class_prior_counts(self, num_classes):
+        # Uu tien 1: so dem do NGUOI DUNG cung cap (tools/dem_so_mau_moi_lop.py).
+        # Bat buoc phai co khi danh gia checkpoint cua task >= 1 duoc luu TRUOC
+        # ban co class_prior_counts: luc do global_proto_memory chua "1% cua lop
+        # cu" tron voi "100% cua lop moi", lop moi bi de cao gap ~100 lan.
+        ovr = self.args.get("class_prior_counts_override")
+        if ovr:
+            if isinstance(ovr, dict):
+                ovr = {int(k): int(v) for k, v in ovr.items()}
+            else:
+                ovr = {i: int(v) for i, v in enumerate(ovr)}
+            if all(ovr.get(c, 0) > 0 for c in range(num_classes)):
+                return [ovr[c] for c in range(num_classes)]
+            logging.warning(
+                "[LOGIT-PRIOR] class_prior_counts_override thieu lop hoac co gia "
+                "tri <= 0 cho %d lop dau -> bo qua, dung nguon khac.", num_classes
+            )
+
         counts = getattr(self, "class_prior_counts", None)
         if not counts:
             gpm = getattr(self, "global_proto_memory", None)

@@ -39,6 +39,10 @@ def setup_parser():
                              'doan. Mac dinh TAT.')
     parser.add_argument('--logit_prior_tau', type=float, default=None,
                         help='He so tau cho hieu chinh prior (mac dinh 1.0).')
+    parser.add_argument('--class_prior_counts_file', type=str, default=None,
+                        help='File JSON chua so mau huan luyen moi lop, sinh boi '
+                             'tools/dem_so_mau_moi_lop.py. Dung lam prior thay cho '
+                             'so dem trong checkpoint (von bi replay 1%% lam lech).')
     parser.add_argument('--logit_prior_tau_sweep', type=str, default=None,
                         help='Quet nhieu tau trong MOT lan chay --mode test, vi du '
                              '"0,0.25,0.5,0.75,1.0". Ket qua ghi ra tau_sweep.csv. '
@@ -75,6 +79,15 @@ def main():
     # Final args: JSON base + CLI overrides
     args = config
     args.update(cli_args)
+
+    # --class_prior_counts_file -> args["class_prior_counts_override"]
+    _cpf = args.get("class_prior_counts_file")
+    if _cpf:
+        with open(_cpf, encoding="utf-8") as _f:
+            _j = json.load(_f)
+        _counts = _j.get("counts", _j) if isinstance(_j, dict) else _j
+        args["class_prior_counts_override"] = _counts
+        print(f"[PRIOR] Nap so dem lop tu {_cpf}: {_counts}")
 
     # --logit_prior_tau_sweep nhan chuoi "0,0.5,1" -> list float
     _sw = args.get("logit_prior_tau_sweep")
