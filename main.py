@@ -30,6 +30,19 @@ def setup_parser():
                               'Tu ban tach file, checkpoint model khong con chua exemplar. '
                               'Dung lai mot file _MEM cho nhieu lan chay se bo qua han pha '
                               'herding — khau dat nhat cua chuong trinh.'))
+    parser.add_argument('--test_rounds', type=str, default=None,
+                        help='Chi danh gia cac vong nay khi --mode test, vi du "11,30". '
+                             'Bo trong = danh gia toan bo checkpoint trong thu muc.')
+    parser.add_argument('--logit_prior_adjust', action='store_const', const=True, default=None,
+                        help='Hieu chinh prior o logit luc SUY LUAN: cong tau*log(pi_c) vao '
+                             'logit moi lop, pi_c uoc luong tu so mau HUAN LUYEN toan lien '
+                             'doan. Mac dinh TAT.')
+    parser.add_argument('--logit_prior_tau', type=float, default=None,
+                        help='He so tau cho hieu chinh prior (mac dinh 1.0).')
+    parser.add_argument('--logit_prior_tau_sweep', type=str, default=None,
+                        help='Quet nhieu tau trong MOT lan chay --mode test, vi du '
+                             '"0,0.25,0.5,0.75,1.0". Ket qua ghi ra tau_sweep.csv. '
+                             'tau=0 chinh la ket qua goc khong hieu chinh.')
     parser.add_argument('--memory_size', type=int, default=None,
                         help='Tong so luong mau luu trong bo nho dem (Exemplar memory).')
     parser.add_argument('--batch_size', type=int, default=None,
@@ -62,6 +75,13 @@ def main():
     # Final args: JSON base + CLI overrides
     args = config
     args.update(cli_args)
+
+    # --logit_prior_tau_sweep nhan chuoi "0,0.5,1" -> list float
+    _sw = args.get("logit_prior_tau_sweep")
+    if isinstance(_sw, str):
+        args["logit_prior_tau_sweep"] = [
+            float(x) for x in _sw.replace(" ", "").split(",") if x
+        ]
 
     if args.get("debug"):
         print("[DEBUG] Che do debug: set init_epoch=2, epochs=2, local_epochs=1, num_rounds=2")

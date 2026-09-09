@@ -7,6 +7,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import csv
 import os
+import re
 import glob
 from datetime import datetime
 
@@ -357,6 +358,15 @@ def _aggregate_client_prototypes(global_model, client_protos, num_clients, args=
         mean_quality = sum(qualities) / len(qualities) if client_stats is not None else 1.0
         global_model.global_proto_memory.update_prototype(class_id, global_proto, total_count, mean_dispersion, mean_quality)
 
+        # So dem lop dung lam PRIOR: chi ghi khi lop dang o TASK CUA CHINH NO,
+        # luc do client con giu toan bo du lieu cua lop. Sang task sau, lop cu
+        # chi con ton tai qua replay 1% nen 'total_count' khong con phan anh
+        # tan suat that -> KHONG ghi de.
+        if not hasattr(global_model, "class_prior_counts"):
+            global_model.class_prior_counts = {}
+        if class_id >= global_model._known_classes or class_id not in global_model.class_prior_counts:
+            global_model.class_prior_counts[int(class_id)] = total_count
+
 
 def _log_classifier_separability(model, tag=""):
     """Chẩn đoán rẻ: fc là CosineLinear nên logit = sigma*cos(z, w_c).
@@ -659,6 +669,10 @@ def _train_federated(args):
             global_model._network.load_state_dict(checkpoint['model_state_dict'])
             if _is_afsic(args) and checkpoint.get('global_proto_memory') is not None:
                 global_model.global_proto_memory = checkpoint['global_proto_memory']
+            if checkpoint.get('class_prior_counts'):
+                global_model.class_prior_counts = {
+                    int(k): int(v) for k, v in checkpoint['class_prior_counts'].items()
+                }
             _restored_net = 0
             # Nguon bo nho: file _MEM.pth neu co, nguoc lai lay trong chinh
             # checkpoint model (dinh dang cu, has_memory khong phai False).
@@ -1196,6 +1210,7 @@ def _train_federated(args):
                 'client_states': client_states,
                 'has_memory': False,
                 'global_proto_memory': getattr(global_model, 'global_proto_memory', None),
+                'class_prior_counts': getattr(global_model, 'class_prior_counts', None),
                 'metrics': cnn_accy
               }, os.path.join(ckpt_dir, ckpt_name))
 
@@ -1290,7 +1305,8 @@ def _train_federated(args):
                     'client_states': client_states,
                     'has_memory': False,
                     'known_classes': global_model._known_classes,
-                    'global_proto_memory': getattr(global_model, 'global_proto_memory', None)
+                    'global_proto_memory': getattr(global_model, 'global_proto_memory', None),
+                    'class_prior_counts': getattr(global_model, 'class_prior_counts', None)
                   }, os.path.join(ckpt_dir, ckpt_name))
 
                   mem_name = f'ckpt_task{task:02d}_memory_client{c:02d}_MEM.pth'
@@ -1318,6 +1334,78 @@ def _train_federated(args):
     logging.info("Training Finished.")
 
 
+def _sweep_tau_one_pass(global_model, loader, num_classes, taus):
+    """
+    Quet nhieu gia tri tau trong MOT lan chay qua tap test.
+
+    Moi lan danh gia tren 41,8 trieu mau mat ~190 giay, nen chay lai cho tung
+    tau la lang phi. Logit khong phu thuoc tau; chi co argmax(logit + tau*log pi)
+    la doi. Vi vay ta cong bias cho tung tau ngay tren GPU trong cung mot batch
+    va cong don ma tran nham cho tung tau.
+
+    Tra ve: {tau: cm [num_classes x num_classes] (hang = that, cot = du doan)}
+    """
+    counts = global_model._class_prior_counts(num_classes)
+    if counts is None:
+        logging.error("[TEST] Khong co so dem lop -> khong the quet tau.")
+        return None
+    n = torch.tensor(counts, dtype=torch.float64)
+    log_pi = torch.log(n / n.sum() + 1e-12).float().to(global_model._device)
+    logging.info("[TEST] counts = {}".format(counts))
+    logging.info("[TEST] log_pi = {}".format([round(float(v), 4) for v in log_pi]))
+
+    cms = {float(t): torch.zeros(num_classes, num_classes, dtype=torch.long,
+                                 device=global_model._device) for t in taus}
+    global_model._network.eval()
+    with torch.no_grad():
+        for _, inputs, targets in loader:
+            inputs = inputs.to(global_model._device)
+            t_dev = targets.to(global_model._device).long()
+            logits = global_model._network(inputs)["logits"]
+            for t in taus:
+                pred = (logits + (float(t) * log_pi).unsqueeze(0)).argmax(dim=1)
+                idx = t_dev * num_classes + pred
+                cms[float(t)] += torch.bincount(
+                    idx, minlength=num_classes * num_classes
+                ).view(num_classes, num_classes)
+    return {t: cm.cpu().numpy() for t, cm in cms.items()}
+
+
+def _metrics_tu_cm(cm):
+    """Tinh acc / precision / recall / f1 (micro, macro, weighted) tu ma tran nham.
+
+    Dinh nghia trung khop utils/toolkit.calculate_metrics voi zero_division=0
+    va tap nhan = tat ca cac lop da hoc.
+    """
+    cm = np.asarray(cm, dtype=np.float64)
+    tp = np.diag(cm)
+    sup = cm.sum(axis=1)                       # so mau that moi lop
+    pred_sum = cm.sum(axis=0)                  # so lan du doan moi lop
+    total = cm.sum()
+
+    prec = np.divide(tp, pred_sum, out=np.zeros_like(tp), where=pred_sum > 0)
+    rec = np.divide(tp, sup, out=np.zeros_like(tp), where=sup > 0)
+    den = prec + rec
+    f1 = np.divide(2 * prec * rec, den, out=np.zeros_like(tp), where=den > 0)
+
+    acc = tp.sum() / total if total > 0 else 0.0
+    w = sup / total if total > 0 else np.zeros_like(sup)
+    return {
+        "top1": round(acc * 100, 2),
+        "precision_micro": round(acc * 100, 2),
+        "recall_micro": round(acc * 100, 2),
+        "f1_micro": round(acc * 100, 2),
+        "precision_macro": round(float(prec.mean()) * 100, 2),
+        "recall_macro": round(float(rec.mean()) * 100, 2),
+        "f1_macro": round(float(f1.mean()) * 100, 2),
+        "precision_weighted": round(float((prec * w).sum()) * 100, 2),
+        "recall_weighted": round(float((rec * w).sum()) * 100, 2),
+        "f1_weighted": round(float((f1 * w).sum()) * 100, 2),
+        "_f1_per_class": [round(float(v) * 100, 2) for v in f1],
+        "_recall_per_class": [round(float(v) * 100, 2) for v in rec],
+    }
+
+
 def run_test(args):
     """
     Chế độ TEST: Tải các checkpoint và đánh giá toàn bộ.
@@ -1335,7 +1423,40 @@ def run_test(args):
         logging.error(f"[TEST] Không tìm thấy checkpoint nào trong {test_ckpt_root}/checkpoints/")
         return
         
-    logging.info(f"[TEST] Tìm thấy {len(ckpt_files)} checkpoint. Bắt đầu đánh giá...")
+
+    # --mode test truoc day khong goi basicConfig nen moi logging.info deu bi
+    # nuot (root logger mac dinh o muc WARNING). Dat lai o day.
+    for _h in logging.root.handlers[:]:
+        logging.root.removeHandler(_h)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(filename)s] => %(message)s",
+        handlers=[
+            logging.FileHandler(filename=os.path.join(test_ckpt_root, "test.log"), encoding="utf-8"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+
+    # Loc theo vong: 'test_rounds' = "11,30" hoac "30". Bo trong = danh gia het.
+    _sel = str(args.get("test_rounds", "") or "").strip()
+    if _sel:
+        _want = {int(x) for x in _sel.replace(" ", "").split(",") if x}
+        _kept = []
+        for _cp in ckpt_files:
+            _m = re.search(r"ckpt_round(\d+)", os.path.basename(_cp))
+            if _m and int(_m.group(1)) in _want:
+                _kept.append(_cp)
+        if not _kept:
+            logging.error(f"[TEST] Khong checkpoint nao khop test_rounds={_sel}")
+            return
+        ckpt_files = _kept
+        logging.info(f"[TEST] Loc test_rounds={_sel} -> con {len(ckpt_files)} checkpoint.")
+
+    logging.info(f"[TEST] Se danh gia {len(ckpt_files)} checkpoint.")
+    if args.get("logit_prior_adjust", False):
+        logging.info(
+            "[TEST] logit_prior_adjust=True, tau={}".format(args.get("logit_prior_tau", 1.0))
+        )
     
     # Init DataManager cho Client 0 để lấy Test Set chung
     dm = DataManager(
@@ -1373,6 +1494,17 @@ def run_test(args):
             global_model._network.load_state_dict(state['model_state_dict'])
             global_model._network.to(args["device"][0])
             global_model._network.eval()
+
+            # Nguon uoc luong prior cho hieu chinh logit. Checkpoint cu (truoc
+            # ban nay) khong co 'class_prior_counts' -> lui ve so dem trong
+            # global_proto_memory. Ca hai deu la thong ke TAP HUAN LUYEN.
+            if state.get('global_proto_memory') is not None:
+                global_model.global_proto_memory = state['global_proto_memory']
+            if state.get('class_prior_counts'):
+                global_model.class_prior_counts = {
+                    int(k): int(v) for k, v in state['class_prior_counts'].items()
+                }
+            global_model._logit_prior_cache = (None, None)
             
             # --mode test la duong lay CON SO BAO CAO -> khong bao gio cat tap test.
             global_model.test_loader = _build_global_learned_test_loader(
@@ -1384,8 +1516,51 @@ def run_test(args):
                 logging.warning(f"[TEST] Empty learned-class global test set for checkpoint: {os.path.basename(cp)}")
                 continue
             
+            # QUET TAU: neu config cho 'logit_prior_tau_sweep' thi chay MOT lan
+            # qua tap test va bao cao chi so cho tat ca cac tau. Logit khong phu
+            # thuoc tau nen khong can chay lai 190 giay cho moi gia tri.
+            _taus = args.get("logit_prior_tau_sweep") or []
+            if _taus:
+                _cms = _sweep_tau_one_pass(
+                    global_model, global_model.test_loader,
+                    int(global_model._total_classes), [float(t) for t in _taus]
+                )
+                if _cms:
+                    _K = int(global_model._total_classes)
+                    _san = 99.7 / max(1, _K)
+                    _ten = [TEN_LOP_CAN_IOV[i] if i < len(TEN_LOP_CAN_IOV) else str(i)
+                            for i in range(_K)]
+                    _sw_path = os.path.join(test_ckpt_root, "tau_sweep.csv")
+                    _new = not os.path.exists(_sw_path)
+                    with open(_sw_path, "a", newline="", encoding="utf-8") as _fs:
+                        _w = csv.writer(_fs)
+                        if _new:
+                            _w.writerow(["checkpoint", "task", "tau", "acc", "f1_mac",
+                                         "rec_mac", "prec_mac", "f1_wei", "san",
+                                         "vuot_san"] + [f"f1_{t}" for t in _ten])
+                        for _t in sorted(_cms):
+                            _mm = _metrics_tu_cm(_cms[_t])
+                            logging.info(
+                                "[SWEEP] {} | tau={:.2f} | Acc {:.2f}% | f1_mac {:.2f} "
+                                "(san {:.2f} -> {}) | rec_mac {:.2f}".format(
+                                    os.path.basename(cp), _t, _mm["top1"], _mm["f1_macro"],
+                                    _san, "VUOT" if _mm["f1_macro"] > _san else "DUOI",
+                                    _mm["recall_macro"]))
+                            logging.info("[SWEEP]   f1 tung lop = {}".format(
+                                dict(zip(_ten, _mm["_f1_per_class"]))))
+                            _w.writerow([os.path.basename(cp), task, _t, _mm["top1"],
+                                         _mm["f1_macro"], _mm["recall_macro"],
+                                         _mm["precision_macro"], _mm["f1_weighted"],
+                                         round(_san, 2),
+                                         int(_mm["f1_macro"] > _san)] + _mm["_f1_per_class"])
+                            _cm_path = os.path.join(
+                                test_ckpt_root,
+                                "confusion_task{:02d}_tau{:g}.csv".format(task, _t))
+                            _luu_confusion_csv(_cms[_t], _ten, _cm_path)
+                    logging.info(f"[SWEEP] Da luu bang quet tau: {_sw_path}")
+
             cnn_accy, _, y_pred, y_true = global_model.eval_task()
-            
+
             logging.info(f"[TEST] {os.path.basename(cp)} | Task {task} | Acc: {cnn_accy['top1']:.2f}% | F1-Mac: {cnn_accy.get('f1_macro', 0):.2f}%")
             
             writer.writerow([

@@ -30,6 +30,10 @@ class BaseLearner(object):
         self._device = args["device"][0]
         self._multiple_gpus = args["device"]
 
+        # Hieu chinh prior o logit (Menon et al., "Long-tail learning via logit
+        # adjustment"). Chi bat khi config bat; cache theo so lop hien tai.
+        self._logit_prior_cache = (None, None)
+
     @property
     def exemplar_size(self):
         assert len(self._data_memory) == len(
@@ -133,13 +137,80 @@ class BaseLearner(object):
         else:
             return (self._data_memory, self._targets_memory)
 
+    # ------------------------------------------------------------------
+    # HIEU CHINH PRIOR O LOGIT (mac dinh TAT -> khong doi bat ky ket qua cu nao)
+    # ------------------------------------------------------------------
+    # Bo phan loai la CosineLinear: logit = sigma * cos(z, w_c). Khong co bias
+    # rieng cho tung lop va sigma dung chung, nen mo hinh KHONG CO tham so nao
+    # de ma hoa viec Benign chiem 99,62% du lieu. Khi ham loss duoc can bang lop
+    # (class_weight_power = 1.0) thi mo hinh hoc p(y|x) duoi prior DEU, con tap
+    # test lai theo prior that -> argmax lech ve lop hiem.
+    #
+    #   log p_that(y=c|x)  =  log p_deu(y=c|x) + log pi_c + const
+    #
+    # nen chi can CONG tau*log(pi_c) vao logit luc suy luan. pi_c uoc luong tu
+    # SO MAU HUAN LUYEN toan lien doan (class_prior_counts), khong dung bat ky
+    # thong ke nao cua tap test.
+    def _class_prior_counts(self, num_classes):
+        counts = getattr(self, "class_prior_counts", None)
+        if not counts:
+            gpm = getattr(self, "global_proto_memory", None)
+            if gpm is None:
+                return None
+            counts = {}
+            for c in range(num_classes):
+                info = gpm.get(c) if hasattr(gpm, "get") else None
+                if info is None:
+                    return None
+                counts[c] = int(info.get("count", 0))
+        out = []
+        for c in range(num_classes):
+            n = int(counts.get(c, counts.get(str(c), 0)) or 0)
+            if n <= 0:
+                return None
+            out.append(n)
+        return out
+
+    def _logit_prior_bias(self, num_classes, device):
+        """Tra ve tensor [num_classes] de CONG vao logit, hoac None neu tat."""
+        if not self.args.get("logit_prior_adjust", False):
+            return None
+        cached_k, cached_v = self._logit_prior_cache
+        if cached_k == num_classes:
+            return None if cached_v is None else cached_v.to(device)
+        counts = self._class_prior_counts(num_classes)
+        if counts is None:
+            logging.warning(
+                "[LOGIT-PRIOR] Bat logit_prior_adjust nhung thieu so dem lop "
+                "(class_prior_counts / global_proto_memory) -> BO QUA hieu chinh."
+            )
+            self._logit_prior_cache = (num_classes, None)
+            return None
+        tau = float(self.args.get("logit_prior_tau", 1.0))
+        n = torch.tensor(counts, dtype=torch.float32)
+        pi = n / n.sum()
+        bias = tau * torch.log(pi + 1e-12)
+        logging.info(
+            "[LOGIT-PRIOR] tau={:.3f} | counts={} | bias={}".format(
+                tau, counts, [round(float(b), 3) for b in bias]
+            )
+        )
+        self._logit_prior_cache = (num_classes, bias)
+        return bias.to(device)
+
     def _compute_accuracy(self, model, loader):
         model.eval()
         y_pred, y_true = [], []
+        prior_bias, prior_ready = None, False
         for i, (_, inputs, targets) in enumerate(loader):
             inputs = inputs.to(self._device)
             with torch.no_grad():
                 outputs = model(inputs)["logits"]
+                if not prior_ready:
+                    prior_bias = self._logit_prior_bias(outputs.shape[1], outputs.device)
+                    prior_ready = True
+                if prior_bias is not None:
+                    outputs = outputs + prior_bias.unsqueeze(0)
             predicts = torch.max(outputs, dim=1)[1]
             y_pred.append(predicts.cpu().numpy())
             y_true.append(targets.cpu().numpy())
@@ -151,11 +222,17 @@ class BaseLearner(object):
         y_pred, y_true = [], []
         total_loss, num_samples = 0.0, 0
         criterion = torch.nn.CrossEntropyLoss()
+        prior_bias, prior_ready = None, False
         for _, (_, inputs, targets) in enumerate(loader):
             inputs = inputs.to(self._device)
             targets_dev = targets.to(self._device).long()
             with torch.no_grad():
                 outputs = self._network(inputs)["logits"]
+                if not prior_ready:
+                    prior_bias = self._logit_prior_bias(outputs.shape[1], outputs.device)
+                    prior_ready = True
+                if prior_bias is not None:
+                    outputs = outputs + prior_bias.unsqueeze(0)
                 loss = criterion(outputs, targets_dev)
                 total_loss += loss.item() * inputs.size(0)
                 num_samples += inputs.size(0)
