@@ -1553,15 +1553,29 @@ def run_test(args):
                                          _mm["precision_macro"], _mm["f1_weighted"],
                                          round(_san, 2),
                                          int(_mm["f1_macro"] > _san)] + _mm["_f1_per_class"])
+                            # Ten file PHAI co so vong: quet 2 checkpoint cung task
+                            # thi ban cu "confusion_task00_tau0.csv" bi checkpoint
+                            # sau ghi de, mat sach ma tran nham cua checkpoint truoc.
                             _cm_path = os.path.join(
                                 test_ckpt_root,
-                                "confusion_task{:02d}_tau{:g}.csv".format(task, _t))
+                                "confusion_task{:02d}_round{:04d}_tau{:g}.csv".format(
+                                    task, int(state.get("round", 0)) + 1, _t))
                             _luu_confusion_csv(_cms[_t], _ten, _cm_path)
                     logging.info(f"[SWEEP] Da luu bang quet tau: {_sw_path}")
                     # Quet da bao gom tau=0 (= ket qua goc, khong hieu chinh) va
                     # da ghi confusion matrix cho tung tau, nen bo qua eval_task()
                     # de khoi chay them mot luot 190 giay nua qua 41,8 trieu mau.
                     if 0.0 in _cms:
+                        # Ghi hang tau=0 (= ket qua goc) vao test_results.csv de
+                        # file nay khong chi con moi dong tieu de.
+                        _m0 = _metrics_tu_cm(_cms[0.0])
+                        writer.writerow([
+                            os.path.basename(cp), task, state['round'], state['global_round'],
+                            _m0["top1"], _m0["precision_micro"], _m0["precision_macro"],
+                            _m0["precision_weighted"], _m0["recall_micro"], _m0["recall_macro"],
+                            _m0["recall_weighted"], _m0["f1_micro"], _m0["f1_macro"],
+                            _m0["f1_weighted"],
+                        ])
                         continue
 
             cnn_accy, _, y_pred, y_true = global_model.eval_task()
