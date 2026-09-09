@@ -1354,6 +1354,23 @@ def _sweep_tau_one_pass(global_model, loader, num_classes, taus):
     logging.info("[TEST] counts = {}".format(counts))
     logging.info("[TEST] log_pi = {}".format([round(float(v), 4) for v in log_pi]))
 
+    # sigma quyet dinh DAI TAU dung duoc. Bo phan loai la CosineLinear nen
+    # logit = sigma*cos, cos trong [-1,1] => chenh lech logit giua hai lop
+    # toi da la 2*sigma. Neu tau*(log pi_max - log pi_min) > 2*sigma thi
+    # prior at het tin hieu cua mo hinh va moi mau roi ve lop pho bien nhat.
+    _sig = None
+    for _n, _p in global_model._network.named_parameters():
+        if _n.endswith("sigma") and _p.numel() == 1:
+            _sig = float(_p)
+            break
+    _spread = float(log_pi.max() - log_pi.min())
+    if _sig is not None and _spread > 0:
+        logging.info(
+            "[TEST] sigma = {:.4f} -> bien do logit toi da 2*sigma = {:.4f}; "
+            "do trai prior = {:.4f} => tau bao hoa quanh {:.3f}".format(
+                _sig, 2 * _sig, _spread, 2 * _sig / _spread)
+        )
+
     cms = {float(t): torch.zeros(num_classes, num_classes, dtype=torch.long,
                                  device=global_model._device) for t in taus}
     global_model._network.eval()
