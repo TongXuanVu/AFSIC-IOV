@@ -1558,6 +1558,11 @@ def run_test(args):
                                 "confusion_task{:02d}_tau{:g}.csv".format(task, _t))
                             _luu_confusion_csv(_cms[_t], _ten, _cm_path)
                     logging.info(f"[SWEEP] Da luu bang quet tau: {_sw_path}")
+                    # Quet da bao gom tau=0 (= ket qua goc, khong hieu chinh) va
+                    # da ghi confusion matrix cho tung tau, nen bo qua eval_task()
+                    # de khoi chay them mot luot 190 giay nua qua 41,8 trieu mau.
+                    if 0.0 in _cms:
+                        continue
 
             cnn_accy, _, y_pred, y_true = global_model.eval_task()
 
