@@ -1,4 +1,5 @@
 import copy
+import math
 import logging
 import numpy as np
 import torch
@@ -73,6 +74,34 @@ class AFSICIDSNet(nn.Module):
         self.feature_dim = self.base_dim
         self._stability_dim = self.base_dim
         self._expand_mode = bool(args.get("expand_feature_space", False))
+        # So KHOI LA trong vector dac trung hien tai. Task 0 co 1 khoi; moi lan
+        # transition them 1. Dung cho block_norm.
+        self._num_blocks = 1
+        # block_norm: chuan hoa TUNG KHOI ve chuan don vi truoc khi noi.
+        #
+        # VI SAO. Do tren checkpoint that (task 4, 5 khoi 64 chieu):
+        #     nang luong ||z_khoi||^2 :  t0 93,07%  t1 2,02%  t2 1,79%
+        #                                t3 1,76%   t4 1,37%
+        # Khoi task 0 nuot 93% nang luong. Ma fc la CosineLinear nen
+        #     logit_c = sigma * cos(z, w_c)  <=  sigma * ||z_khoi(c)|| / ||z||
+        # tuc mot lop dat trong so trong khoi t4 bi CHAN TREN o
+        #     2,21 * 0,1168 = 0,258
+        # con lop task 0 dat toi 2,21 * 0,9647 = 2,13. Do duoc: logit trung
+        # binh cua Benign 2,1085 (dung bang tran), cua systematic -0,3966 —
+        # va systematic THANG 0 lan tren 10.905 mau. Lop moi khong thua vi hoc
+        # kem, no khong bao gio duoc phep thang.
+        #
+        # Chuan hoa moi khoi ve chuan don vi cho moi khoi cung tran cosine
+        # 1/sqrt(so khoi), nen cac task canh tranh cong bang.
+        self._block_norm = bool(args.get("block_norm", False))
+        # block_norm_gamma: NGHIENG ve task moi. Moi lan no ra, khoi cu bi chia
+        # cho gamma so voi khoi moi, nen khoi cua task j co chuan ti le
+        # gamma^j — cang moi cang lon.
+        #   gamma = 1.0  -> moi khoi bang nhau (dung block_norm thuan)
+        #   gamma > 1.0  -> uu tien task moi
+        # Day la MOT tham so, khong phai hang so tuy tien: bao cao kem duong
+        # do nhay theo gamma thi phan bien kiem chung duoc.
+        self._block_gamma = float(args.get("block_norm_gamma", 1.0))
         self.fc = None
         self.stability_encoder = None
         self.plasticity_adapter = None
@@ -91,7 +120,18 @@ class AFSICIDSNet(nn.Module):
         g = self.gate(phi_x, a_x)
 
         if self._expand_mode:
-            z = torch.cat([phi_x, g * a_x], dim=1)
+            if self._block_norm:
+                # phi_x da chua _num_blocks-1 khoi don vi -> giu chuan
+                # sqrt(so khoi do); khoi moi ve chuan 1. Quy nap lai thi MOI
+                # khoi la deu co chuan 1.
+                _b_truoc = max(1, int(self._num_blocks) - 1)
+                _g = max(1e-6, float(self._block_gamma))
+                z = torch.cat([
+                    self._chuan_hoa_khoi(phi_x, math.sqrt(_b_truoc) / _g),
+                    self._chuan_hoa_khoi(g * a_x, 1.0),
+                ], dim=1)
+            else:
+                z = torch.cat([phi_x, g * a_x], dim=1)
         else:
             z = g * phi_x + (1.0 - g) * a_x
         # Dac ta muc 5.3:  z = Norm( g (*) h_s + (1-g) (*) h_a )
@@ -136,6 +176,11 @@ class AFSICIDSNet(nn.Module):
             for p in self.fc.parameters():
                 p.requires_grad = True
 
+    @staticmethod
+    def _chuan_hoa_khoi(v, muc_tieu=1.0):
+        """Dua mot khoi ve chuan `muc_tieu` (mac dinh 1)."""
+        return v / (v.norm(dim=1, keepdim=True) + 1e-8) * muc_tieu
+
     def update_fc(self, nb_classes):
         """Dung lai classifier cho nb_classes lop o so chieu HIEN TAI.
 
@@ -173,12 +218,18 @@ class AFSICIDSNet(nn.Module):
                 return _feat(self.extractor, x)
 
         class FusedFeatureExtractor(nn.Module):
-            def __init__(self, stability, plasticity, gate, expand):
+            def __init__(self, stability, plasticity, gate, expand,
+                         block_norm=False, num_blocks_prev=1, block_gamma=1.0):
                 super().__init__()
                 self.stability = copy.deepcopy(stability)
                 self.plasticity = copy.deepcopy(plasticity)
                 self.gate = copy.deepcopy(gate)
                 self.expand = bool(expand)
+                # PHAI dung Y HET quy tac cua mang chinh, neu khong dac trung
+                # luc suy luan khac luc huan luyen.
+                self.block_norm = bool(block_norm)
+                self.num_blocks_prev = int(num_blocks_prev)
+                self.block_gamma = float(block_gamma)
                 for p in self.parameters():
                     p.requires_grad = False
                 self.eval()
@@ -187,6 +238,13 @@ class AFSICIDSNet(nn.Module):
                 a_x = _feat(self.plasticity, x)
                 g = self.gate(phi_x, a_x)
                 if self.expand:
+                    if self.block_norm:
+                        _n = lambda v, m: v / (v.norm(dim=1, keepdim=True) + 1e-8) * m
+                        _g = max(1e-6, float(self.block_gamma))
+                        return torch.cat([
+                            _n(phi_x, math.sqrt(max(1, self.num_blocks_prev)) / _g),
+                            _n(g * a_x, 1.0),
+                        ], dim=1)
                     return torch.cat([phi_x, g * a_x], dim=1)
                 return g * phi_x + (1.0 - g) * a_x
             def forward(self, x):
@@ -202,7 +260,10 @@ class AFSICIDSNet(nn.Module):
             self._stability_dim = self.base_dim
         else:
             self.stability_encoder = FusedFeatureExtractor(
-                self.stability_encoder, self.plasticity_adapter, self.gate, _expand)
+                self.stability_encoder, self.plasticity_adapter, self.gate, _expand,
+                block_norm=self._block_norm,
+                num_blocks_prev=max(1, int(self._num_blocks) - 1),
+                block_gamma=self._block_gamma)
             # Nhanh stability moi tai tao dung phep hop nhat cua task truoc,
             # nen so chieu cua no chinh la feature_dim TRUOC transition nay.
             self._stability_dim = self.feature_dim
@@ -265,6 +326,8 @@ class AFSICIDSNet(nn.Module):
             _source, _src_dim, bottleneck_dim, plastic=_plastic)
         self.gate = VectorGate(self._stability_dim, _src_dim if _expand else self._stability_dim)
         self.feature_dim = (self._stability_dim + _src_dim) if _expand else self._stability_dim
+        if _expand:
+            self._num_blocks = int(self._num_blocks) + 1
 
         # fc duoc dung o so chieu CU trong incremental_train; sau khi khong gian
         # dac trung no ra thi phai dung lai cho khop.

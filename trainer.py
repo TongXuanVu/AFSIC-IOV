@@ -1504,9 +1504,22 @@ def run_test(args):
             task = state['task']
             
             # Cập nhật kiến trúc Model theo số task
+            #
+            # _known_classes CHI duoc cap nhat trong after_task(), ma vong dung
+            # lai nay khong goi. Thieu no thi moi vong deu tinh
+            #     _total_classes = 0 + get_task_size(t)
+            # nen task 1 va 2 ra 3 lop (dung ra 6 va 9), con task 3 ra 2 lop —
+            # it hon fc hien co 3 hang — va update_fc NEM LOI:
+            #     RuntimeError: The expanded size of the tensor (2) must match
+            #     the existing size (3) at non-singleton dimension 0
+            # Tuc --mode test chi chay duoc cho checkpoint task 0. Cap nhat
+            # _known_classes sau moi buoc, tru buoc cuoi (task hien tai phai
+            # giu _known_classes = so lop truoc no).
             global_model = factory.get_model(args["model_name"], args)
-            for _ in range(task + 1):
+            for _t in range(task + 1):
                 global_model.incremental_train(dm, skip_train=True)
+                if _t < task:
+                    global_model._known_classes = global_model._total_classes
             
             global_model._network.load_state_dict(state['model_state_dict'])
             global_model._network.to(args["device"][0])
