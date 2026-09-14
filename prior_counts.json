@@ -1,0 +1,20 @@
+{
+  "_ghi_chu": "So mau HUAN LUYEN moi lop, lay tu D:/DATA/summary.json (khoa class_totals_train) cua chinh bo du lieu. Khong dung bat ky thong ke nao cua tap test.",
+  "_nguon": "summary.json -> class_totals_train",
+  "_tong": 98113593,
+  "counts": [
+    97301380,
+    338635,
+    28963,
+    13404,
+    157082,
+    94597,
+    11768,
+    7341,
+    17431,
+    5267,
+    13391,
+    46179,
+    78155
+  ]
+}
