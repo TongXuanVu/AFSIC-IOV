@@ -1283,8 +1283,25 @@ def _train_federated(args):
                 #           duoc o muc TASK (du cho lich chay nhieu session), chi
                 #           mat kha nang resume GIUA pha memory.
                 # Voi lan chay xac nhan 5 task: tiet kiem ~4 gio, gan mot session.
-                _mem_ck = args.get("memory_ckpt_per_client", True)
-                if _mem_ck or c == args["num_clients"] - 1:
+                # memory_ckpt_every = N (moi N client luu mot lan) — muc O GIUA
+                # hai lua chon cu, va la lua chon DUY NHAT dung duoc cho 100
+                # client tren Kaggle:
+                #   per_client=True  -> luu 100 lan, O(n^2), [DO] 2 gio + 6,6 GB
+                #   per_client=False -> chi luu SAU KHI ca 100 client xong. Phien
+                #                       chet giua pha herding la mat SACH, ma
+                #                       herding 1% tren 29 trieu mau Benign rat
+                #                       de vuot qua gioi han mot phien.
+                #   every=10         -> 10 lan luu, mat toi da 10 client neu chet.
+                # Khau resume da san sang: file _MEM mang theo last_client_done va
+                # trainer bo qua dung so client da xong (xem doan tren).
+                _every = args.get("memory_ckpt_every")
+                _last = (c == args["num_clients"] - 1)
+                if _every is not None:
+                    _every = max(1, int(_every))
+                    _mem_ck = ((c + 1) % _every == 0) or _last
+                else:
+                    _mem_ck = bool(args.get("memory_ckpt_per_client", True)) or _last
+                if _mem_ck:
                   # Ghi HAI file rieng:
                   #   ckpt_task{t}_memory_client{c}.pth        model + trong so client  (~15 MB)
                   #   ckpt_task{t}_memory_client{c}_MEM.pth    exemplar               (~80-120 MB)

@@ -80,7 +80,7 @@
   "skip_memory_phase": false,
   "memory_per_class": null,
   "class_weight_power": 0.5,
-  "force_rebuild_memory": false,
+  "force_rebuild_memory": true,
   "adapter_bottleneck": 64,
   "proto_rho_mode": "share",
   "calibrate_once_per_task": true,
@@ -95,5 +95,6 @@
   "_comment_vaitro": "DOI CHUNG: y het ban block_norm, chi khac block_norm=false.",
   "memory_ckpt_every": 10,
   "_comment_memory_ckpt": "CHIA NHO PHA HERDING. memory_ckpt_every=10 -> luu sau moi 10 client (10 lan cho 100 client). Hai lua chon cu deu khong dung duoc o day: memory_ckpt_per_client=true luu 100 lan, O(n^2), do duoc 2 gio va 6,6 GB mot task; =false chi luu SAU KHI ca 100 client xong, nen phien Kaggle chet giua pha herding la mat SACH — ma herding 1% tren 29 trieu mau Benign rat de vuot gioi han mot phien. Voi every=10, chet giua chung chi mat toi da 10 client. Resume: truyen --resume_memory tro toi file _MEM MOI NHAT, trainer doc last_client_done trong do va bo qua dung so client da xong.",
-  "_comment_buoc": "BUOC 2 — nhanh DOI CHUNG, task 1..4. LUON chay kem:\n    --resume        <ckpt_round0030_task00_...pth>   tu buoc 1\n    --resume_memory <ckpt_task00_memory_client99_MEM.pth>  tu buoc 1\nforce_rebuild_memory=false de KHONG herding lai (neu de true thi no dung lai tu dau bat ke da truyen --resume_memory). Buoc 2 va buoc 3 dung CHUNG mot file _MEM: hai nhanh chia se buffer exemplar giong het nhau, loai bo not mot bien nhieu khi so sanh."
+  "max_tasks": 1,
+  "_comment_buoc": "BUOC 1 — CHAY TASK 0 MOT LAN CHO CA HAI KICH BAN. block_norm VO HIEU o task 0 (do duoc: dac trung va logit giong het tung bit, vi nhanh expand chi chay tu task 1), nen checkpoint va bo nho exemplar sinh ra o day dung chung duoc cho ca hai nhanh — vua tiet kiem mot nua, vua lam phep doi chung sach tuyet doi (hai nhanh xuat phat tu dung mot diem va dung mot buffer replay). force_rebuild_memory=true vi chinh sach replay doi tu chan 10.000 sang 1% moi lop. Giu lai file ckpt_task00_memory_client99_MEM.pth cho buoc 2 va 3."
 }

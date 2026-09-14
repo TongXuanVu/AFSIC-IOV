@@ -77,11 +77,10 @@
   "quality_eval_max_samples": 50000,
   "eval_max_per_class": null,
   "ckpt_every_n_rounds": 1,
-  "memory_ckpt_per_client": false,
   "skip_memory_phase": false,
   "memory_per_class": null,
   "class_weight_power": 0.5,
-  "force_rebuild_memory": true,
+  "force_rebuild_memory": false,
   "adapter_bottleneck": 64,
   "proto_rho_mode": "share",
   "calibrate_once_per_task": true,
@@ -96,5 +95,8 @@
   "block_norm": true,
   "block_norm_gamma": 1.0,
   "_comment_block_norm": "Khoi task 0 chiem 93,07% nang luong dac trung, cac khoi task sau duoi 2% moi khoi. fc la CosineLinear nen logit_c <= sigma*||z_khoi(c)||/||z||, ma lop moi dat 95-97% trong so trong khoi cua chinh no -> tran logit 0,258 so voi 2,13 cua lop task 0. Do la ly do 10/10 lop moi cho F1 = 0,00.",
-  "_comment_gamma": "Phan bo nang luong DO DUOC o task 4 (t0..t4): gamma=1,0 -> 20/20/20/20/20 | 1,2 -> 11,8/17,1/20,8/23,9/26,5 | 1,5 -> 5,3/11,9/19,4/27,4/36,0 | 2,0 -> 1,4/5,7/14,3/28,6/50,0. gamma=1,0 la diem nguyen tac; gamma>1 phai bao cao kem duong do nhay va chon tren validation."
+  "_comment_gamma": "Phan bo nang luong DO DUOC o task 4 (t0..t4): gamma=1,0 -> 20/20/20/20/20 | 1,2 -> 11,8/17,1/20,8/23,9/26,5 | 1,5 -> 5,3/11,9/19,4/27,4/36,0 | 2,0 -> 1,4/5,7/14,3/28,6/50,0. gamma=1,0 la diem nguyen tac; gamma>1 phai bao cao kem duong do nhay va chon tren validation.",
+  "memory_ckpt_every": 10,
+  "_comment_memory_ckpt": "CHIA NHO PHA HERDING. memory_ckpt_every=10 -> luu sau moi 10 client (10 lan cho 100 client). Hai lua chon cu deu khong dung duoc o day: memory_ckpt_per_client=true luu 100 lan, O(n^2), do duoc 2 gio va 6,6 GB mot task; =false chi luu SAU KHI ca 100 client xong, nen phien Kaggle chet giua pha herding la mat SACH — ma herding 1% tren 29 trieu mau Benign rat de vuot gioi han mot phien. Voi every=10, chet giua chung chi mat toi da 10 client. Resume: truyen --resume_memory tro toi file _MEM MOI NHAT, trainer doc last_client_done trong do va bo qua dung so client da xong.",
+  "_comment_buoc": "BUOC 3 — nhanh BLOCK_NORM, task 1..4. LUON chay kem:\n    --resume        <ckpt_round0030_task00_...pth>   tu buoc 1\n    --resume_memory <ckpt_task00_memory_client99_MEM.pth>  tu buoc 1\nforce_rebuild_memory=false de KHONG herding lai (neu de true thi no dung lai tu dau bat ke da truyen --resume_memory). Buoc 2 va buoc 3 dung CHUNG mot file _MEM: hai nhanh chia se buffer exemplar giong het nhau, loai bo not mot bien nhieu khi so sanh."
 }
