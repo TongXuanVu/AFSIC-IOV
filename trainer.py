@@ -6,6 +6,7 @@ import copy
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import csv
+import json
 import os
 import re
 import glob
@@ -27,6 +28,60 @@ from utils.aggregation import is_aggregated_state_key, compute_aggregation_weigh
 from utils.fast_loader import make_loader
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
+
+
+_TEN_LOP_HIEN_TAI = None
+
+
+def _la_can_iov(dataset):
+    return str(dataset).lower() in ("can_iov", "can-iov", "caniov")
+
+
+def _dat_ten_lop(dataset):
+    """Chon bang ten lop theo bo du lieu.
+
+    Truoc day moi cho deu dung TEN_LOP_CAN_IOV (13 ten) roi lui ve str(i). Voi
+    bo IoT 34 lop thi 13 lop dau bi in NHAM ten CAN-IoV — lop 0 cua IoT la
+    DDoS-ICMP_Flood nhung ma tran nham ghi "Benign". Ten IoT lay tu
+    utils/iot_class_names.json = task_mapping.json trai phang; da kiem thu tu
+    do trung khop dung chi so sau khi anh xa nhan (class_order.index).
+    """
+    global _TEN_LOP_HIEN_TAI
+    if _la_can_iov(dataset):
+        _TEN_LOP_HIEN_TAI = list(TEN_LOP_CAN_IOV)
+        return
+    ten = []
+    if str(dataset).lower() in ("cic_iot23", "ciciot23", "cic-iot23"):
+        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", "iot_class_names.json")
+        if os.path.exists(_p):
+            with open(_p, encoding="utf-8") as _f:
+                ten = json.load(_f)
+    _TEN_LOP_HIEN_TAI = ten
+
+
+def _ten_lop(K):
+    ds = _TEN_LOP_HIEN_TAI if _TEN_LOP_HIEN_TAI is not None else TEN_LOP_CAN_IOV
+    return [ds[i] if i < len(ds) else str(i) for i in range(int(K))]
+
+
+def _san_mot_lop(test_targets, K, dataset):
+    """f1_macro khi doan TAT CA la lop pho bien nhat — muc 'san' trong log.
+
+    CAN-IoV GIU NGUYEN 99,7/K: moi bang so sanh tu truoc toi gio deu dung con so
+    nay (33,23 / 16,62 / 11,08 / 9,06 / 7,67), doi di se gay nham.
+    Bo khac thi tinh tu nhan tap test: lop lon nhat chiem ti le p thi F1 cua no
+    la 2p/(1+p), cac lop con lai 0. Voi IoT lop lon nhat chi ~15% nen san rat
+    thap — dung 99,7/K se bao "DUOI san" oan cho mot mo hinh dang hoc tot.
+    """
+    K = max(1, int(K))
+    if _la_can_iov(dataset):
+        return 99.7 / K
+    y = np.asarray(test_targets).ravel()
+    y = y[(y >= 0) & (y < K)]
+    if y.size == 0:
+        return 0.0
+    p = np.bincount(y, minlength=K).max() / float(y.size)
+    return (200.0 * p / (1.0 + p)) / K
 
 
 def _is_afsic(args):
@@ -511,6 +566,7 @@ def train(args):
 
 
 def _train_federated(args):
+    _dat_ten_lop(args.get("dataset"))
     init_cls = 0 if args["init_cls"] == args["increment"] else args["init_cls"]
 
     timestamp = datetime.now().strftime("%d-%m-%y_%H-%M")
@@ -1108,7 +1164,7 @@ def _train_federated(args):
             # Do la chi so DUY NHAT dung de cham diem nen phai thay ngay.
             _K = max(1, int(global_model._total_classes))
             _f1m = float(cnn_accy.get("f1_macro", 0))
-            _san = 99.7 / _K
+            _san = _san_mot_lop(client_dms[0]._test_targets, _K, args.get("dataset"))
             logging.info(
                 f"[Task {task} | Round {round_idx+1}] "
                 f"Acc: {cnn_accy['top1']:.2f}% | "
@@ -1444,6 +1500,7 @@ def run_test(args):
     """
     Chế độ TEST: Tải các checkpoint và đánh giá toàn bộ.
     """
+    _dat_ten_lop(args.get("dataset"))
     _set_random()
     _set_device(args)
     
@@ -1574,9 +1631,8 @@ def run_test(args):
                 )
                 if _cms:
                     _K = int(global_model._total_classes)
-                    _san = 99.7 / max(1, _K)
-                    _ten = [TEN_LOP_CAN_IOV[i] if i < len(TEN_LOP_CAN_IOV) else str(i)
-                            for i in range(_K)]
+                    _san = _san_mot_lop(dm._test_targets, _K, args.get("dataset"))
+                    _ten = _ten_lop(_K)
                     _sw_path = os.path.join(test_ckpt_root, "tau_sweep.csv")
                     _new = not os.path.exists(_sw_path)
                     with open(_sw_path, "a", newline="", encoding="utf-8") as _fs:
@@ -1847,8 +1903,7 @@ def plot_confusion_matrix(y_true, y_pred, task_id, run_dir):
     K = int(max(int(y_true.max()) if y_true.size else 0,
                 int(y_pred_top1.max()) if y_pred_top1.size else 0) + 1)
     labels = list(range(K))
-    ten_lop = [TEN_LOP_CAN_IOV[i] if i < len(TEN_LOP_CAN_IOV) else str(i)
-               for i in labels]
+    ten_lop = _ten_lop(K)
     cm = confusion_matrix(y_true, y_pred_top1, labels=labels)
 
     csv_path = os.path.join(run_dir, f'confusion_matrix_task_{task_id:02d}.csv')

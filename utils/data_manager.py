@@ -338,6 +338,14 @@ def _get_idata(dataset_name):
     if name in ("can_iov", "can-iov", "caniov"):
         from utils.data_can_iov import iCANIoV
         return iCANIoV()
+    elif name in ("cic_iot23", "ciciot23", "cic-iot23"):
+        # Chep nguyen tu AFSIC-IDS (utils/data_cic_iot23.py) — loader da chay
+        # tren Kaggle cho moi ket qua IoT cua AFSIC-IDS. Bo IoT 100 client GIU
+        # ID nhan goc voi thu tu task khong tuan tu; loader tra class_order tu
+        # task_mapping_label_ids.json va _map_new_class_index anh xa lai (da
+        # kiem: ban vector hoa trung khop order.index(y) tren dung thu tu IoT).
+        from utils.data_cic_iot23 import iCICIoT23
+        return iCICIoT23()
     else:
         raise NotImplementedError("Unknown dataset {}.".format(dataset_name))
 

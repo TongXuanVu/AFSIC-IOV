@@ -25,7 +25,7 @@
     42
   ],
   "_comment_training": "100 client IoV (RSU/MEC/fleet, tham gia động), 30 vòng/task, 1 epoch nội bộ",
-  "batch_size": 512,
+  "batch_size": 8192,
   "num_clients": 100,
   "num_rounds": 30,
   "local_epochs": 1,
@@ -77,6 +77,7 @@
   "quality_eval_max_samples": 50000,
   "eval_max_per_class": null,
   "ckpt_every_n_rounds": 1,
+  "memory_ckpt_per_client": false,
   "skip_memory_phase": false,
   "memory_per_class": null,
   "class_weight_power": 0.5,
@@ -84,16 +85,13 @@
   "adapter_bottleneck": 64,
   "proto_rho_mode": "share",
   "calibrate_once_per_task": true,
-  "calibrate_new_classes_only": false,
+  "calibrate_new_classes_only": true,
   "expand_feature_space": true,
   "_comment_sua_hai_tang": "SUA HAI TANG (tim ra tu log 03-09-26_17-21). TANG 1 — dau phan loai bi reset moi vong: _calibrate_classifier_from_prototypes chay sau MOI lan gop (trainer.py:914) chu khong phai moi task, nen fc.weight = ma tran prototype o moi vong; moi thu fc hoc duoc va moi thu khau gop lam voi fc deu bi vut bo. Do la ly do loss phang o 1,7846 suot 13 vong roi task 1 lat tu acc 86,29 (f1_mac 20,98) xuong acc 0,92 (f1_mac 2,87) o vong 14 va khong bao gio hoi. calibrate_once_per_task=true -> prototype chi con dung de KHOI TAO dau task. calibrate_new_classes_only=true + bo `and not is_task_init` o trainer.py -> dau task chi ghi de trong so cac lop MOI, giu nguyen phan lop cu da hoc. TANG 2 — khong gian dac trung khong no: convs/cnn1d.py out_dim=64 co dinh cho ca 5 task/13 lop, moi task sau chi them mot adapter bottleneck 64->64->64 tron vao CUNG 64 chieu do. Do la ly do prototype dau task 1 co cos(w_i,w_j)=0,9917. expand_feature_space=true -> doi phep hop nhat tu to hop loi sang NOI, feature_dim 64->128->192->256->320 (dung day so DER cua HFIN), nhanh plasticity doc du lieu THO thay vi 64 con so dau ra cua nhanh stability. Checkpoint task 0 van dung duoc (task 0 khong co nhanh nao); checkpoint task>=1 cu KHONG con tuong thich.",
   "_comment_calib_chieu": "calibrate_new_classes_only=FALSE. Bat=true ghep voi expand_feature_space gay loi: update_fc dat 0 cho lop cu o cac chieu MOI, ma CosineLinear la cosine thuan (linears.py:56 F.linear(F.normalize(z), F.normalize(w))) nen w_lop_cu la vector don vi CHI nam trong cac chieu cu, trong khi z chuan hoa tren TOAN BO chieu. Tran cua cos(z,w_c) = sqrt(D_c/D_t): o task 3 (D=256) Benign chi dat 0,50 con lop moi dat 1,00 — chap doi, voi sigma dung chung. [DO] log 04-09 task 3 vong 1: Acc 0,77% / Old Acc 0,75% / New Acc 82,35% — hong NGAY tu vong 1 roi bo len 1,86% o vong 16, dung chu ky cua loi khoi tao chu khong phai troi dan. Tran nay xau dan: Benign 0,707 (task1) -> 0,577 (task2) -> 0,50 (task3) -> 0,447 (task4). Dat false: dau moi task ghi lai trong so MOI LOP tu prototype o so chieu moi (trainer.py:638 da tinh san prototype lop cu o chieu moi roi). calibrate_once_per_task van = true nen fc van duoc hoc va gop suot 30 vong.",
   "replay_old_ratio": 0.2,
   "_comment_replay_can_bang": "replay_old_ratio=0.2 — balanced replay kieu iCaRL/HFIN (edge_server.py:286), CHI nhan ban LEN. [DO] ti le lop cu trong tap huan luyen troi tu do: task 1 client khong lo ~1,2-2,0% (Benign chet), task 2 client 0 la 90,3% (New Acc 0,00%). Ghim o 20%. Chi kich hoat khi lop cu < 20% nen chi tac dong vao task 1 cua kich ban full; o task >= 2 va o 10shot/1percent (lop moi chi 10 mau) thi lop cu von da ap dao nen co nay KHONG lam gi. Da thu chieu cat bot va BO: task 2 client 4 co 55 mau moi, cat replay ve 20% con 13 mau -> ca tap chi 68 mau; 10shot con 37 mau. Chieu do phai xu ly o khau gop, khong phai vut replay.",
   "_comment_replay_1pct": "QUAY VE REPLAY 1% MOI LOP: memory_per_class=null -> utils/memory.py:36 roi xuong nhanh memory_ratio (0.01). [DO] hau qua len buffer: 973.025 Benign : 3.396 DoS : 296 double = 3.287:1 (chinh sach chan 10.000 cho 3,4:1). Tong buffer 976.717 thay vi 628.345. CANH BAO CHI PHI: herding chay 1 buoc GEMV tren toan bo ung vien moi mau duoc chon, nen tren lop Benign ~29 trieu mau so buoc tang tu 10.000 len ~290.000 — pha memory cuoi task se lau hon nhieu lan (do duoc 22 phut o che do 10.000).",
-  "_comment_batch": "BATCH 512 de khop SPCIL-FL (exps_fl/can_iov_fl.json: batch_size 512). Voi local_epochs=1, client 973.000 mau: batch 8192 -> 119 buoc/vong (17.850 buoc tong), batch 512 -> 1.901 buoc/vong (285.150 buoc). Chenh 16 lan so buoc cap nhat la loi the toi uu hoa thuan tuy, khong lien quan phuong phap. DANH DOI: o batch 512, 85,9% so lo KHONG chua mau `double` nao va 16,9% khong co `DoS`, nen gradient cua lop hiem nhieu hon.",
-  "_comment_vaitro": "DOI CHUNG: y het ban block_norm, chi khac block_norm=false.",
   "memory_ckpt_every": 10,
-  "_comment_memory_ckpt": "CHIA NHO PHA HERDING. memory_ckpt_every=10 -> luu sau moi 10 client (10 lan cho 100 client). Hai lua chon cu deu khong dung duoc o day: memory_ckpt_per_client=true luu 100 lan, O(n^2), do duoc 2 gio va 6,6 GB mot task; =false chi luu SAU KHI ca 100 client xong, nen phien Kaggle chet giua pha herding la mat SACH — ma herding 1% tren 29 trieu mau Benign rat de vuot gioi han mot phien. Voi every=10, chet giua chung chi mat toi da 10 client. Resume: truyen --resume_memory tro toi file _MEM MOI NHAT, trainer doc last_client_done trong do va bo qua dung so client da xong.",
-  "_comment_buoc": "BUOC 2 — nhanh DOI CHUNG, task 1..4. LUON chay kem:\n    --resume        <ckpt_round0030_task00_...pth>   tu buoc 1\n    --resume_memory <ckpt_task00_memory_client99_MEM.pth>  tu buoc 1\nforce_rebuild_memory=false de KHONG herding lai (neu de true thi no dung lai tu dau bat ke da truyen --resume_memory). Buoc 2 va buoc 3 dung CHUNG mot file _MEM: hai nhanh chia se buffer exemplar giong het nhau, loai bo not mot bien nhieu khi so sanh."
+  "_comment_buoc": "BUOC 2 — nhanh DOI CHUNG (block_norm TAT), task 1..4.\nLUON chay kem:\n    --resume        <ckpt_round0030_task00_r030_acc99.7.pth>   (03-09-26_07-23)\n    --resume_memory <ckpt_task00_memory_client99_MEM.pth>      (sinh o BUOC 1)\nforce_rebuild_memory=false de KHONG herding lai. Buoc 2 va 3 dung CHUNG ca hai file -> hai nhanh cung xuat phat diem va cung buffer replay, phep so sanh chi con MOT bien la block_norm."
 }
