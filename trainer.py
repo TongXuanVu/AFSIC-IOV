@@ -436,10 +436,16 @@ def _log_classifier_separability(model, tag=""):
         n = C.size(0)
         if n < 2:
             return
-        off = C[~torch.eye(n, dtype=torch.bool, device=C.device)]
+        mask = ~torch.eye(n, dtype=torch.bool, device=C.device)
+        off = C[mask]
+        Cm = C.masked_fill(~mask, -2.0)
+        _k = int(torch.argmax(Cm))
+        _sig = getattr(model._network.fc, "sigma", None)
+        _sig = float(_sig.data.reshape(-1)[0]) if _sig is not None else float("nan")
         logging.info(
             f"[DIAG]{tag} classifier cos(w_i,w_j) off-diag: "
             f"min={off.min():.4f} mean={off.mean():.4f} max={off.max():.4f} "
+            f"(cap {_k // n},{_k % n}) sigma={_sig:.3f} "
             f"(gan 1.0 = khong tach duoc lop)"
         )
     except Exception as e:
@@ -487,7 +493,36 @@ def _calibrate_classifier_from_prototypes(model, is_task_init=False):
         class_ids = range(model._known_classes, model._total_classes)
     else:
         class_ids = range(model._total_classes)
-    model._network.init_new_class_weights_from_prototypes(prototypes, class_ids)
+    # proto_init_center: tru tam cac lop CU truoc khi imprint (mac dinh tat).
+    # Ly do: xem utils/inc_net.py::init_new_class_weights_from_prototypes
+    _center = None
+    if model.args.get("proto_init_center", False) and model._known_classes > 0:
+        _D = int(model._network.fc.weight.shape[1])
+        _olds = []
+        for _c in range(model._known_classes):
+            _p = prototypes.get(_c) if isinstance(prototypes, dict) else (
+                prototypes[_c] if _c < len(prototypes) else None)
+            if _p is None:
+                continue
+            _p = torch.as_tensor(_p).float().flatten()
+            if _p.numel() == _D:
+                _olds.append(_p)
+        if _olds:
+            _center = torch.stack(_olds).mean(0)
+    model._network.init_new_class_weights_from_prototypes(prototypes, class_ids, center=_center)
+
+    # Lop CU: dien khoi dac trung moi (dang = 0 sau update_fc) tu prototype lop
+    # cu o khong gian hien tai. Chi o luc khoi tao task, chi khi lop cu KHONG bi
+    # ghi de o tren. Mac dinh tat -> giu nguyen hanh vi cu.
+    # Ly do va so do: xem utils/inc_net.py::init_old_class_new_block_from_prototypes
+    if (is_task_init
+            and model.args.get("init_old_new_block_from_prototypes", False)
+            and model.args.get("calibrate_new_classes_only", False)
+            and model._known_classes > 0
+            and hasattr(model._network, "init_old_class_new_block_from_prototypes")):
+        return model._network.init_old_class_new_block_from_prototypes(
+            prototypes, range(model._known_classes))
+    return None
 
 
 _MEMORY_STATE_KEYS = ("data_memory", "targets_memory", "local_memory")
@@ -710,6 +745,12 @@ def _train_federated(args):
     for task in range(nb_tasks):
         # Save previous global network BEFORE expansion. AFSIC KD needs this old model.
         prev_global_network = copy.deepcopy(global_model._network) if _is_afsic(args) and task > 0 else None
+        # KD so logit cu voi logit moi (T=2). Neu cosine_sigma dat thang do moi
+        # thi mo hinh cu (vd. checkpoint task 0 co sigma 2,22) phai dung CUNG
+        # thang do, khong thi dich KD mem gan nhu phang. argmax khong doi.
+        if (prev_global_network is not None and args.get("cosine_sigma") is not None
+                and getattr(prev_global_network.fc, "sigma", None) is not None):
+            prev_global_network.fc.sigma.data.fill_(float(args["cosine_sigma"]))
 
         # 1. Mở rộng kiến trúc (nhưng không train) để lấy đúng kích thước mô hình
         global_model.incremental_train(client_dms[0], skip_train=True)
@@ -842,7 +883,13 @@ def _train_federated(args):
                 local_models[c].global_proto_memory = copy.deepcopy(global_model.global_proto_memory)
                 _calibrate_classifier_from_prototypes(local_models[c], is_task_init=True)
             
-            _calibrate_classifier_from_prototypes(global_model, is_task_init=True)
+            _n_old = _calibrate_classifier_from_prototypes(global_model, is_task_init=True)
+            if _n_old is not None:
+                logging.info(
+                    f"[INIT] lop cu: dien khoi dac trung moi cho {_n_old}/{global_model._known_classes} lop "
+                    f"(new_block_start={getattr(global_model._network, '_new_block_start', None)})"
+                )
+            _log_classifier_separability(global_model, tag="[INIT]")
             logging.info("Class classifier weights successfully initialized from prototypes.")
 
             for c in range(args["num_clients"]):

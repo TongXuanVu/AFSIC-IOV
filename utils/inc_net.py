@@ -199,8 +199,32 @@ class AFSICIDSNet(nn.Module):
                 fc.weight.data[:nb_output, old_dim:] = 0.0
             if self.fc.sigma is not None:
                 fc.sigma.data = self.fc.sigma.data
+        self._apply_cosine_sigma(fc)
         del self.fc
         self.fc = fc
+
+    def _apply_cosine_sigma(self, fc):
+        """Dat thang do (nhiet do nghich) cua CosineLinear: logit = sigma*cos.
+
+        [DO] ckpt task 0 (LR1 FINAL): sigma hoc duoc chi 2,22 -> logit nam trong
+        [-2,22 ; 2,22]. Voi dac trung va trong so deu chuan hoa, loss softmax co
+        CAN DUOI khong the vuot qua khi thang do nho (NormFace, Wang et al.,
+        ACM MM 2017): log(1 + (C-1)*exp(-s*C/(C-1))). Voi s = 2,22 can nay la
+        0,30 / 0,51 / 0,63 / 0,73 cho C = 6 / 9 / 11 / 13 lop — tang theo so
+        lop, khop voi viec task 3-4 khong bao gio thoat trang thai sup.
+        Mau dung (da phan loai dung) khong bao gio bao hoa nen gradient cua
+        99% Benign lan at lop hiem, mo hinh bap benh giua hai nghiem suy bien.
+
+        cosine_sigma = None (mac dinh) -> GIU NGUYEN hanh vi cu.
+        cosine_sigma = s -> gan sigma = s; cosine_sigma_trainable (mac dinh
+        false) quyet dinh co cho hoc tiep hay khong. Doi sigma KHONG doi argmax
+        cua checkpoint cu (moi logit nhan cung mot so duong).
+        """
+        _s = self.args.get("cosine_sigma") if isinstance(getattr(self, "args", None), dict) else None
+        if _s is None or getattr(fc, "sigma", None) is None:
+            return
+        fc.sigma.data.fill_(float(_s))
+        fc.sigma.requires_grad = bool(self.args.get("cosine_sigma_trainable", False))
 
     def transition_to_incremental_stage(self):
         _expand = self._expand_mode
@@ -326,6 +350,10 @@ class AFSICIDSNet(nn.Module):
             _source, _src_dim, bottleneck_dim, plastic=_plastic)
         self.gate = VectorGate(self._stability_dim, _src_dim if _expand else self._stability_dim)
         self.feature_dim = (self._stability_dim + _src_dim) if _expand else self._stability_dim
+        # Cot dau tien cua khoi dac trung MOI (chi co nghia khi expand). Dung de
+        # khoi tao phan trong so cua lop CU tren khoi moi (xem
+        # init_old_class_new_block_from_prototypes).
+        self._new_block_start = int(self._stability_dim) if _expand else None
         if _expand:
             self._num_blocks = int(self._num_blocks) + 1
 
@@ -341,7 +369,74 @@ class AFSICIDSNet(nn.Module):
             _expand, bottleneck_dim)
         self.to(self._device)
 
-    def init_new_class_weights_from_prototypes(self, prototypes, class_ids):
+    def init_old_class_new_block_from_prototypes(self, prototypes, class_ids):
+        """Dien khoi dac trung MOI cho trong so cua cac lop CU.
+
+        VAN DE: update_fc dat 0 cho cac cot moi cua lop cu (cach cua DER). DER
+        dung bo phan loai TUYEN TINH nen cot 0 vo hai. Nhung fc o day la
+        CosineLinear: dac trung duoc chuan hoa CA vector [phi, g*a], nen voi
+        w_cu = [w, 0] thi cos(z, w_cu) <= |phi| / |z| < 1 — lop cu bi TRAN tren
+        mot cach he thong, trong khi lop moi (khoi tao tu prototype tren CA
+        khong gian) dat cos gan 1 voi moi dac trung ReLU.
+        [DO] afsic-b2-goc: round 1 cua task 1/2/3/4 Old Acc = 0,75 / 0,75 /
+        0,75 / 0,75 %, New Acc = 6 / 40 / 82 %: MOI mau (ca 99% Benign) bi doan
+        la lop moi. Task 3 va 4 khong bao gio hoi phuc trong 30 round.
+
+        CACH SUA: giu NGUYEN huong da hoc cua lop cu tren khoi cu, chi thay 0 o
+        khoi moi bang phan khoi-moi cua prototype lop cu (tinh o khong gian
+        HIEN TAI, trainer da tinh san luc dang ky task). Do lon khoi cu duoc dat
+        bang |phan khoi-cu cua prototype| de ti le hai khoi dung nhu du lieu that.
+        Chi dien khi khoi moi con dung bang 0 (vua no ra), goi lai la vo hai.
+        Tra ve so lop da dien.
+        """
+        start = getattr(self, "_new_block_start", None)
+        W = self.fc.weight.data
+        D = int(W.shape[1])
+        if start is None or start <= 0 or start >= D:
+            return 0
+        done = 0
+        for cid in class_ids:
+            if cid >= W.shape[0]:
+                continue
+            if isinstance(prototypes, dict):
+                proto = prototypes.get(cid)
+            else:
+                proto = prototypes[cid] if cid < len(prototypes) else None
+            if proto is None:
+                continue
+            if isinstance(proto, np.ndarray):
+                proto = torch.from_numpy(proto)
+            proto = proto.float().to(W.device).flatten()
+            if proto.numel() != D:
+                continue
+            if float(W[cid, start:].abs().sum()) > 0.0:
+                continue
+            w_old = W[cid, :start]
+            n_w = float(torch.norm(w_old, p=2))
+            if n_w < 1e-8:
+                continue
+            p_old, p_new = proto[:start], proto[start:]
+            row = torch.cat([w_old / n_w * torch.norm(p_old, p=2), p_new])
+            W[cid] = row / (torch.norm(row, p=2) + 1e-8)
+            done += 1
+        return done
+
+    def init_new_class_weights_from_prototypes(self, prototypes, class_ids, center=None):
+        """Ghi w_c = prototype chuan hoa (imprinting).
+
+        center (tuy chon): vector tru di truoc khi chuan hoa, w_c = (p_c - center)/|.|.
+        [DO] tren checkpoint task 0 that: cos giua prototype cac lop = 0,94-0,99
+        (dac trung ReLU cung huong). Prototype tho vi the co cos ~0,95 voi MOI
+        mau -> lop moi thang tuyet doi luc khoi tao task: 96,6 % mau bi doan la
+        lop moi (khop Old Acc 0,75 % cua afsic-b2-goc). Tru tam cac lop CU
+        (trung binh prototype lop cu) bo di phan huong chung, giu phan phan biet.
+        """
+        if center is not None:
+            if isinstance(center, np.ndarray):
+                center = torch.from_numpy(center)
+            center = center.float().to(self.fc.weight.device).flatten()
+            if center.numel() != self.fc.weight.shape[1]:
+                center = None
         for cid in class_ids:
             if cid < self.fc.out_features:
                 if isinstance(prototypes, dict):
@@ -359,6 +454,8 @@ class AFSICIDSNet(nn.Module):
                     # Prototype tinh o so chieu khac (vd. con luu tu task truoc
                     # khi khong gian dac trung chua no). Bo qua thay vi hong.
                     continue
+                if center is not None:
+                    proto = proto.float().flatten() - center
                 proto_norm = proto / (torch.norm(proto, p=2) + 1e-8)
                 self.fc.weight.data[cid] = proto_norm
 
