@@ -11,7 +11,7 @@ def get_convnet(args, pretrained=False):
     name = args["convnet_type"].lower()
     if name == 'cnn1d':
         from convs.cnn1d import CNN1DConvNet
-        return CNN1DConvNet()
+        return CNN1DConvNet(norm_type=args.get("norm_type", "batch"))
 
     else:
         raise NotImplementedError("Unknown type {}".format(name))
@@ -175,6 +175,8 @@ class AFSICIDSNet(nn.Module):
         if self.fc is not None:
             for p in self.fc.parameters():
                 p.requires_grad = True
+            if self.args.get("fixed_classifier", False):
+                self.fc.weight.requires_grad = False   # phuong an B: neo co dinh
 
     @staticmethod
     def _chuan_hoa_khoi(v, muc_tieu=1.0):
@@ -190,6 +192,7 @@ class AFSICIDSNet(nn.Module):
         chieu dac trung cua task moi cho toi khi chinh no hoc duoc.
         """
         fc = CosineLinear(self.feature_dim, nb_classes, sigma=True)
+        nb_output = 0
         if self.fc is not None:
             nb_output = self.fc.out_features
             old_dim = int(self.fc.weight.shape[1])
@@ -200,8 +203,54 @@ class AFSICIDSNet(nn.Module):
             if self.fc.sigma is not None:
                 fc.sigma.data = self.fc.sigma.data
         self._apply_cosine_sigma(fc)
+        if self.args.get("fixed_classifier", False):
+            # Goi tu incremental_train (so lop tang): lop cu = nb_output.
+            # Goi tu transition (so lop giu nguyen, chi no so chieu): SINH LAI
+            # neo cho lop moi cua task nay o so chieu MOI — neu khong, neo lop
+            # moi chi nam trong khoi dac trung cu (dong bang) va khoi moi = 0.
+            if nb_classes > nb_output:
+                self._fixed_known = nb_output
+            self._set_fixed_anchors(fc, min(nb_output, getattr(self, "_fixed_known", nb_output)))
         del self.fc
         self.fc = fc
+
+    def _set_fixed_anchors(self, fc, nb_keep):
+        """Phuong an B: bo phan loai CO DINH theo 'neo' truc giao.
+
+        VI SAO. Tren CAN-IoV 49/50 client task 0 chi co MOT lop. Client chi
+        thay mau duong nen CE cuc bo keo fc cua lop minh ve moi huong va day
+        cac lop khac ra — client Benign va client DoS keo fc nguoc chieu nhau,
+        mo hinh gop dao giua 'toan Benign' va 'toan DoS' (log debug/final).
+        Giu cac vector lop CO DINH va tach xa nhau thi khong con xung dot o fc:
+        client chi con keo dac trung mau cua minh ve neo cua lop minh.
+        Tham chieu: FedAwS (Yu et al., ICML 2020, "Federated Learning with Only
+        Positive Labels"), FedETF (Li et al., ICCV 2023).
+
+        Hang 0..nb_keep-1 (lop cu) giu nguyen — da truc chuan tu truoc, phan
+        chieu moi = 0 van truc chuan. Hang moi: sinh ngau nhien CO DINH THEO
+        SEED roi truc giao hoa voi hang cu va voi nhau (QR), nen moi client va
+        global sinh ra CUNG mot ma tran. requires_grad=False: optimizer bo qua.
+        """
+        W = fc.weight.data
+        C, D = W.shape
+        if C > D:
+            raise ValueError(f"fixed_classifier: {C} lop > {D} chieu, khong truc giao duoc")
+        _seed = self.args.get("seed", 0)
+        _seed = int(_seed[0] if isinstance(_seed, (list, tuple)) else _seed)
+        g = torch.Generator().manual_seed(1000003 * (_seed + 1) + 7919 * C + D)
+        R = torch.randn(D, C, generator=g, dtype=torch.float64)
+        if nb_keep > 0:
+            old = F.normalize(W[:nb_keep].double().cpu(), p=2, dim=1)
+            R[:, :nb_keep] = old.t()
+        # QR tren [cu | ngau nhien]: nb_keep cot dau tai tao dung khong gian cu,
+        # cac cot sau truc giao voi no.
+        Q, Rr = torch.linalg.qr(R)
+        Q = Q * torch.sign(torch.diagonal(Rr)).unsqueeze(0)   # giu dung dau cot cu
+        A = Q.t().float()
+        if nb_keep > 0:
+            A[:nb_keep] = F.normalize(W[:nb_keep].float().cpu(), p=2, dim=1)
+        W.copy_(A.to(W.device))
+        fc.weight.requires_grad = False
 
     def _apply_cosine_sigma(self, fc):
         """Dat thang do (nhiet do nghich) cua CosineLinear: logit = sigma*cos.
@@ -468,7 +517,7 @@ class AFSICIDSNet(nn.Module):
         if self.gate is not None:
             params.extend(self.gate.parameters())
         if self.fc is not None:
-            params.extend(self.fc.parameters())
+            params.extend(p for p in self.fc.parameters() if p.requires_grad)
         return params
 
     def get_incremental_state_dict(self):

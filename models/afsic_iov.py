@@ -40,7 +40,11 @@ class AFSIC_IoV(AFSIC_IDS):
             max_samples_per_class=max_samples_per_class, seed=seed,
             report_full_count=report_full_count,
         )
-        self.local_protos.update(protos)
+        # Khong giu momen bac hai (CCVR) trong bo nho lau dai cua client:
+        # chi can cho server trong round hien tai.
+        self.local_protos.update({
+            k: {kk: vv for kk, vv in v.items() if not kk.startswith("stat_")}
+            for k, v in protos.items()})
         return protos
 
     def _personalization_rho(self, class_id):

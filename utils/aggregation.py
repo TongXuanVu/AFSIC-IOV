@@ -243,6 +243,36 @@ def compute_aggregation_weights(
     tau_agg = args.get("tau_aggregation", 1.0)
     alpha = torch.softmax(Q_tensor / tau_agg, dim=0).tolist()
 
+    # ── Phuong an A': trong so gop CAN BANG THEO LOP ─────────────────────────
+    # [DO] debug/final: 49/50 client task 0 chi co MOT lop; 19 client Benign giu
+    # 55-76% tong alpha (beta_n=1 con uu ai client nhieu mau). Voi co nay moi
+    # lop (trong cac lop MOI cua task hien tai) nhan 1/C tong trong so; trong
+    # mot lop chia theo so mau n_{i,c}. KHONG bo mau nao — chi doi cach gop.
+    #   alpha_i = sum_c (1/C) * n_{i,c} / N_c
+    # Q_i van duoc tinh va ghi log nhung khong dung khi bat co nay.
+    # Mac dinh TAT -> giu nguyen hanh vi cu.
+    if args.get("class_balanced_aggregation", False):
+        cls_range = range(global_model._known_classes, global_model._total_classes)
+        acc_clients = [active_client_indices[pos] for pos in accepted_positions]
+        N_c = {k: 0 for k in cls_range}
+        for c in acc_clients:
+            for k in cls_range:
+                N_c[k] += int(client_protos[c].get(k, {}).get("count", 0))
+        present = [k for k in cls_range if N_c[k] > 0]
+        if present:
+            a = []
+            for c in acc_clients:
+                s = 0.0
+                for k in present:
+                    s += int(client_protos[c].get(k, {}).get("count", 0)) / N_c[k]
+                a.append(s / len(present))
+            tot = sum(a)
+            if tot > 0:
+                alpha = [v / tot for v in a]
+                logging.info(
+                    f"class_balanced_aggregation: {len(present)} lop, N_c="
+                    f"{ {k: N_c[k] for k in present} } | alpha {min(alpha):.2e}..{max(alpha):.4f}")
+
     # Số bước optimizer cục bộ của mỗi client trong round này.
     #
     # VÌ SAO CẦN: `local_epochs=1` + batch cố định ⇒ số bước tỉ lệ THẲNG với n_i.

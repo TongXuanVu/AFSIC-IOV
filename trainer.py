@@ -477,6 +477,9 @@ def _calibrate_classifier_from_prototypes(model, is_task_init=False):
         return
     if not model.args.get("calibrate_with_prototypes", True):
         return
+    # Phuong an B: fc la neo CO DINH, khong duoc ghi de bang prototype.
+    if model.args.get("fixed_classifier", False):
+        return
     if model.args.get("calibrate_once_per_task", False) and not is_task_init:
         return
     # AFSIC-IoV: dùng personalized prototypes (trộn local/global theo rho);
@@ -523,6 +526,85 @@ def _calibrate_classifier_from_prototypes(model, is_task_init=False):
         return model._network.init_old_class_new_block_from_prototypes(
             prototypes, range(model._known_classes))
     return None
+
+
+def _ccvr_calibrated_fc_weight(global_model, client_dms, client_ids, args):
+    """Phuong an C: hieu chinh bo phan loai bang dac trung AO (CCVR).
+
+    Luo, Chen, Hu, Zhang, Liang, Feng — "No Fear of Heterogeneity: Classifier
+    Calibration for Federated Learning with Non-IID Data", NeurIPS 2021.
+
+    1. Moi client tinh, bang EXTRACTOR CUA MO HINH TOAN CUC (khong phai mo
+       hinh cuc bo vua train), so mau + tong + momen bac hai cua dac trung da
+       chuan hoa L2, cho tung lop no co. Lay mau khi DO theo proto_max_samples
+       — client van train tren toan bo du lieu.
+    2. Server gop -> trung binh mu_c va hiep phuong sai Sigma_c toan cuc.
+    3. Sinh ccvr_samples_per_class dac trung ao ~ N(mu_c, Sigma_c) CHO MOI LOP
+       (can bang tuyet doi), huan luyen lai trong so fc (cosine, sigma giu
+       nguyen) ccvr_steps buoc full-batch.
+    Tra ve ma tran trong so da hieu chinh (KHONG ghi vao mo hinh) hoac None.
+    Chi dung de DANH GIA: mo hinh toan cuc gui xuong client van giu fc cu
+    (neo co dinh khi bat fixed_classifier), nen CCVR khong lam doi qua trinh
+    hoc cua client.
+    """
+    from models.afsic_ids import AFSIC_IDS
+    fc = global_model._network.fc
+    W0 = fc.weight.data.detach().clone()
+    C, D = W0.shape
+    cap = args.get("ccvr_max_samples", args.get("proto_max_samples"))
+    acc = {}
+    for c in client_ids:
+        protos = AFSIC_IDS.compute_local_prototypes(
+            global_model, client_dms[c], class_ids=range(C),
+            max_samples_per_class=cap, seed=args.get("seed", 0) + 7 * c + 1,
+            report_full_count=True, with_stats=True)
+        for k, info in protos.items():
+            if "stat_sq" not in info:
+                continue
+            n, sm, sq = acc.get(k, (0, 0.0, 0.0))
+            acc[k] = (n + info["stat_n"], sm + info["stat_sum"].double(),
+                      sq + info["stat_sq"].double())
+    classes = [k for k in range(C) if k in acc and acc[k][0] > 1]
+    if len(classes) < 2:
+        logging.warning(f"[CCVR] chi co thong ke cho {len(classes)} lop -> bo qua")
+        return None
+    dev = W0.device
+    M = int(args.get("ccvr_samples_per_class", 2000))
+    g = torch.Generator().manual_seed(int(args.get("seed", 0)) + 4242)
+    Xs, Ys = [], []
+    for k in classes:
+        n, sm, sq = acc[k]
+        mu = sm / n
+        cov = sq / n - torch.outer(mu, mu)
+        cov = 0.5 * (cov + cov.t())
+        evals, evecs = torch.linalg.eigh(cov)
+        evals = evals.clamp_min(0.0) + 1e-6 * float(evals.clamp_min(0).mean() + 1e-12)
+        L = evecs * evals.sqrt().unsqueeze(0)
+        z = mu.unsqueeze(0) + torch.randn(M, D, generator=g, dtype=torch.float64) @ L.t()
+        Xs.append(z.float())
+        Ys.append(torch.full((M,), k, dtype=torch.long))
+    X = F.normalize(torch.cat(Xs).to(dev), p=2, dim=1)
+    Y = torch.cat(Ys).to(dev)
+    _sig = getattr(fc, "sigma", None)
+    sigma = float(_sig.data.reshape(-1)[0]) if _sig is not None else 1.0
+    W = W0.clone().float().to(dev).requires_grad_(True)
+    mask = torch.zeros(C, 1, device=dev)
+    mask[classes] = 1.0
+    opt = torch.optim.Adam([W], lr=float(args.get("ccvr_lr", 0.01)))
+    steps = int(args.get("ccvr_steps", 300))
+    with torch.enable_grad():
+        for _ in range(steps):
+            logits = sigma * (X @ F.normalize(W, p=2, dim=1).t())
+            loss = F.cross_entropy(logits, Y)
+            opt.zero_grad()
+            loss.backward()
+            W.grad.mul_(mask)          # lop khong co thong ke: giu nguyen
+            opt.step()
+    with torch.no_grad():
+        acc_v = (torch.argmax(sigma * (X @ F.normalize(W, p=2, dim=1).t()), 1) == Y).float().mean()
+    logging.info(f"[CCVR] {len(classes)} lop, {M} mau ao/lop, {steps} buoc | "
+                 f"loss {loss.item():.4f} | acc tren mau ao {100 * acc_v.item():.2f}%")
+    return W.detach()
 
 
 _MEMORY_STATE_KEYS = ("data_memory", "targets_memory", "local_memory")
@@ -929,6 +1011,7 @@ def _train_federated(args):
             client_weights = []
             client_accs = []
             client_protos = []
+            client_steps = {}
             
             global_state_round_start = copy.deepcopy(global_model._network.state_dict())
             
@@ -952,6 +1035,10 @@ def _train_federated(args):
                 local_models[c].args["epochs"] = args["local_epochs"]
                 local_models[c].args["start_round"] = 0
                 local_models[c]._train(local_models[c].train_loader, None)
+                # So buoc optimizer THAT cua client (cho FedNova): dem truc tiep
+                # tu loader thay vi uoc luong tu 'count' cua prototype (o task >= 1
+                # count gom ca lop cu -> sai).
+                client_steps[c] = len(local_models[c].train_loader) * max(1, int(args["local_epochs"]))
                 
                 client_weights.append(copy.deepcopy(local_models[c]._network.state_dict()))
 
@@ -1033,6 +1120,11 @@ def _train_federated(args):
                         active_client_indices=active_client_indices,
                         task=task
                     )
+
+                    if client_steps and "tau_local" in agg_stats:
+                        agg_stats["tau_local"] = [
+                            int(client_steps.get(c, agg_stats["tau_local"][i]))
+                            for i, c in enumerate(active_client_indices)]
 
                     active_client_indices = [active_client_indices[pos] for pos in accepted_positions]
                     client_weights_accepted = [client_weights[pos] for pos in accepted_positions]
@@ -1179,7 +1271,22 @@ def _train_federated(args):
                 f"0-{global_model._total_classes - 1}"
             )
             
+            # Phuong an C: danh gia voi fc da hieu chinh CCVR, roi tra lai fc cu
+            # (mo hinh gui xuong client khong doi).
+            _W_train, _W_ccvr = None, None
+            if args.get("ccvr_calibration", False) and _is_afsic(args) and client_weights:
+                _W_ccvr = _ccvr_calibrated_fc_weight(
+                    global_model, client_dms,
+                    [c for c in range(args["num_clients"]) if local_models[c].train_loader is not None],
+                    args)
+                if _W_ccvr is not None:
+                    _W_train = global_model._network.fc.weight.data.clone()
+                    global_model._network.fc.weight.data.copy_(_W_ccvr)
+
             cnn_accy, nme_accy, y_pred, y_true = global_model.eval_task()
+
+            if _W_train is not None:
+                global_model._network.fc.weight.data.copy_(_W_train)
             
             results_all.append(cnn_accy)
             avg_acc = sum(r['top1'] for r in results_all) / len(results_all)
@@ -1314,6 +1421,7 @@ def _train_federated(args):
                 'has_memory': False,
                 'global_proto_memory': getattr(global_model, 'global_proto_memory', None),
                 'class_prior_counts': getattr(global_model, 'class_prior_counts', None),
+                'ccvr_fc_weight': (_W_ccvr.cpu() if _W_ccvr is not None else None),
                 'metrics': cnn_accy
               }, os.path.join(ckpt_dir, ckpt_name))
 

@@ -356,7 +356,7 @@ class AFSIC_IDS(BaseLearner):
             )
 
     def compute_local_prototypes(self, data_manager, class_ids=None, max_samples_per_class=None, seed=0,
-                                 report_full_count=False):
+                                 report_full_count=False, with_stats=False):
         """Tính prototype dạng streaming 1 lượt — không giữ ma trận feature trong RAM.
 
         Tương đương chính xác với bản cũ về mặt toán học: với m = mean(feature
@@ -426,12 +426,21 @@ class AFSIC_IDS(BaseLearner):
 
             loader = make_loader(dset, batch_size=self.args["batch_size"], shuffle=False)
             feat_sum = None
+            # Phuong an C (CCVR): them MOMEN BAC HAI sum(z z^T) cua dac trung da
+            # chuan hoa, de server dung lai trung binh + hiep phuong sai tung lop.
+            # Chi tinh khi goi voi with_stats=True (D x D, D=64..320 -> re).
+            _want_sq = bool(with_stats)
+            feat_sq = None
             with torch.no_grad():
                 for _, inputs, _ in loader:
                     feats = self._network.extract_vector(inputs.to(self._device))
                     feats = F.normalize(feats, p=2, dim=1)
                     part = feats.sum(dim=0).double().cpu()
                     feat_sum = part if feat_sum is None else feat_sum + part
+                    if _want_sq:
+                        _f = feats.double()
+                        sq = (_f.t() @ _f).cpu()
+                        feat_sq = sq if feat_sq is None else feat_sq + sq
 
             if feat_sum is None:
                 continue
@@ -446,6 +455,10 @@ class AFSIC_IDS(BaseLearner):
                 "count": count,
                 "dispersion": dispersion
             }
+            if feat_sq is not None:
+                local_protos[class_idx]["stat_n"] = int(n_used)
+                local_protos[class_idx]["stat_sum"] = feat_sum.clone()
+                local_protos[class_idx]["stat_sq"] = feat_sq.float()
         return local_protos
 
 
