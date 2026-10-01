@@ -74,6 +74,15 @@ class AFSICIDSNet(nn.Module):
         self.feature_dim = self.base_dim
         self._stability_dim = self.base_dim
         self._expand_mode = bool(args.get("expand_feature_space", False))
+        # Dac ta 5.1: encoder dung chung h_s duoc HOC o moi stage (client gui
+        # Delta theta len server, L_prox keo theta ve theta^{t-1}). Mac dinh
+        # false = hanh vi cu: tu task 1 nhanh stability bi dong bang.
+        self._shared_trainable = bool(args.get("shared_encoder_trainable", False))
+        # Dac ta 5.4: P(y=c|x) = softmax(gamma * cos(z, p~_c)); KHONG co trong so
+        # phan loai hoc duoc. Mac dinh false = hanh vi cu (CosineLinear hoc duoc).
+        self._proto_clf = bool(args.get("prototype_classifier", False))
+        if self._proto_clf and args.get("fixed_classifier", False):
+            raise ValueError("prototype_classifier va fixed_classifier loai tru nhau")
         # So KHOI LA trong vector dac trung hien tai. Task 0 co 1 khoi; moi lan
         # transition them 1. Dung cho block_norm.
         self._num_blocks = 1
@@ -112,9 +121,14 @@ class AFSICIDSNet(nn.Module):
         if self.stability_encoder is None:
             return _feat(self.convnet, x)
 
-        self.stability_encoder.eval()
-        with torch.no_grad():
+        if self._shared_trainable:
+            # Encoder dung chung duoc huan luyen: giu graph, che do train/eval
+            # theo net.train()/net.eval().
             phi_x = _feat(self.stability_encoder, x)
+        else:
+            self.stability_encoder.eval()
+            with torch.no_grad():
+                phi_x = _feat(self.stability_encoder, x)
 
         a_x = _feat(self.plasticity_adapter, x)
         g = self.gate(phi_x, a_x)
@@ -154,6 +168,8 @@ class AFSICIDSNet(nn.Module):
         return out
 
     def freeze_stability_encoder(self):
+        if self._shared_trainable:
+            return   # 5.1: encoder dung chung duoc huan luyen va gop o moi stage
         if self.stability_encoder is not None:
             for p in self.stability_encoder.parameters():
                 p.requires_grad = False
@@ -175,8 +191,8 @@ class AFSICIDSNet(nn.Module):
         if self.fc is not None:
             for p in self.fc.parameters():
                 p.requires_grad = True
-            if self.args.get("fixed_classifier", False):
-                self.fc.weight.requires_grad = False   # phuong an B: neo co dinh
+            if self.args.get("fixed_classifier", False) or self._proto_clf:
+                self.fc.weight.requires_grad = False   # neo co dinh / prototype classifier
 
     @staticmethod
     def _chuan_hoa_khoi(v, muc_tieu=1.0):
@@ -211,6 +227,10 @@ class AFSICIDSNet(nn.Module):
             if nb_classes > nb_output:
                 self._fixed_known = nb_output
             self._set_fixed_anchors(fc, min(nb_output, getattr(self, "_fixed_known", nb_output)))
+        if self._proto_clf:
+            # 5.4: trong so = prototype p~_c, ghi boi calibrate sau moi lan gop,
+            # khong hoc bang gradient.
+            fc.weight.requires_grad = False
         del self.fc
         self.fc = fc
 
@@ -349,6 +369,12 @@ class AFSICIDSNet(nn.Module):
             # nen so chieu cua no chinh la feature_dim TRUOC transition nay.
             self._stability_dim = self.feature_dim
 
+        if self._shared_trainable:
+            # Hai lop boc o tren dong bang tham so trong __init__; mo lai de
+            # nhanh stability hoc duoc (dac ta 5.1).
+            for p in self.stability_encoder.parameters():
+                p.requires_grad = True
+
         _plastic = bool(self.args.get("plastic_source_trainable", False))
 
         class BottleneckFeatureAdapter(nn.Module):
@@ -396,6 +422,26 @@ class AFSICIDSNet(nn.Module):
             def forward(self, x):
                 return {"features": self.extract_vector(x)}
 
+        class RawInputAdapter(nn.Module):
+            """Dac ta 5.2: h_a = A_psi(x). MLP bottleneck NHO doc thang dau vao tho x
+            (khong boc/sao chep encoder). Ten thuoc tinh `adapter` de khop bo loc
+            gop trong so (plasticity_adapter.adapter) va loss RS (L1 tren A_psi)."""
+            def __init__(self, in_dim, out_dim, bottleneck_dim):
+                super().__init__()
+                self.adapter = nn.Sequential(
+                    nn.Linear(in_dim, bottleneck_dim),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(bottleneck_dim, out_dim),
+                )
+            def extract_vector(self, x):
+                return self.adapter(x.flatten(1) if x.dim() > 2 else x)
+            def forward(self, x):
+                return {"features": self.extract_vector(x)}
+
+        _adapter_input = str(self.args.get("adapter_input", "features")).lower()
+        if _adapter_input not in ("features", "raw"):
+            raise ValueError(f"adapter_input phai la 'features' hoac 'raw', nhan {_adapter_input!r}")
+
         if _expand:
             # Nhanh moi doc du lieu THO, luon 64 chieu ra.
             _source, _src_dim = self.convnet, self.base_dim
@@ -403,8 +449,12 @@ class AFSICIDSNet(nn.Module):
             _source, _src_dim = self.stability_encoder, self._stability_dim
 
         bottleneck_dim = int(self.args.get("adapter_bottleneck", max(8, _src_dim // 4)))
-        self.plasticity_adapter = BottleneckFeatureAdapter(
-            _source, _src_dim, bottleneck_dim, plastic=_plastic)
+        if _adapter_input == "raw":
+            self.plasticity_adapter = RawInputAdapter(
+                int(self.args.get("adapter_input_dim", 31)), _src_dim, bottleneck_dim)
+        else:
+            self.plasticity_adapter = BottleneckFeatureAdapter(
+                _source, _src_dim, bottleneck_dim, plastic=_plastic)
         self.gate = VectorGate(self._stability_dim, _src_dim if _expand else self._stability_dim)
         self.feature_dim = (self._stability_dim + _src_dim) if _expand else self._stability_dim
         # Cot dau tien cua khoi dac trung MOI (chi co nghia khi expand). Dung de
@@ -518,6 +568,8 @@ class AFSICIDSNet(nn.Module):
 
     def get_trainable_incremental_params(self):
         params = []
+        if self._shared_trainable and self.stability_encoder is not None:
+            params.extend(p for p in self.stability_encoder.parameters() if p.requires_grad)
         if self.plasticity_adapter is not None:
             # plastic_source_trainable=True thi frozen_source cung nam trong
             # .parameters() voi requires_grad=True nen tu dong duoc huan luyen.

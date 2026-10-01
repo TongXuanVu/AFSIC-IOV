@@ -480,7 +480,10 @@ def _calibrate_classifier_from_prototypes(model, is_task_init=False):
     # Phuong an B: fc la neo CO DINH, khong duoc ghi de bang prototype.
     if model.args.get("fixed_classifier", False):
         return
-    if model.args.get("calibrate_once_per_task", False) and not is_task_init:
+    # Dac ta 5.4: bo phan loai prototype thuan -> sau MOI lan gop, w_c = p~_c cho
+    # MOI lop (bo qua calibrate_once_per_task / calibrate_new_classes_only).
+    _proto_clf = bool(model.args.get("prototype_classifier", False))
+    if (not _proto_clf) and model.args.get("calibrate_once_per_task", False) and not is_task_init:
         return
     # AFSIC-IoV: dùng personalized prototypes (trộn local/global theo rho);
     # với global model không có local_protos, kết quả trùng global prototypes.
@@ -492,14 +495,14 @@ def _calibrate_classifier_from_prototypes(model, is_task_init=False):
     # dung o lan goi duy nhat co y nghia (khoi tao task). Bo ve dung y nghia:
     # bat co -> chi ghi de trong so cua cac lop MOI, giu nguyen phan lop cu ma
     # cac task truoc da hoc.
-    if model.args.get("calibrate_new_classes_only", False):
+    if model.args.get("calibrate_new_classes_only", False) and not _proto_clf:
         class_ids = range(model._known_classes, model._total_classes)
     else:
         class_ids = range(model._total_classes)
     # proto_init_center: tru tam cac lop CU truoc khi imprint (mac dinh tat).
     # Ly do: xem utils/inc_net.py::init_new_class_weights_from_prototypes
     _center = None
-    if model.args.get("proto_init_center", False) and model._known_classes > 0:
+    if (not _proto_clf) and model.args.get("proto_init_center", False) and model._known_classes > 0:
         _D = int(model._network.fc.weight.shape[1])
         _olds = []
         for _c in range(model._known_classes):
@@ -519,6 +522,7 @@ def _calibrate_classifier_from_prototypes(model, is_task_init=False):
     # ghi de o tren. Mac dinh tat -> giu nguyen hanh vi cu.
     # Ly do va so do: xem utils/inc_net.py::init_old_class_new_block_from_prototypes
     if (is_task_init
+            and (not _proto_clf)
             and model.args.get("init_old_new_block_from_prototypes", False)
             and model.args.get("calibrate_new_classes_only", False)
             and model._known_classes > 0
@@ -647,15 +651,22 @@ def _split_client_states(local_models, num_clients):
 _PERSONALIZED_KEY_MARKERS = ("stability_encoder", "plasticity_adapter", "gate")
 
 
-def _load_global_into_client(local_model, global_state, task, args):
+def _load_global_into_client(local_model, global_state, task, args, stage_init=False):
     """Nạp trọng số global vào client.
+
+    stage_init=True (chỉ ở lúc mở task) kèm personalized_init_from_global=true:
+    nạp ĐẦY ĐỦ từ global, để mọi client bắt đầu adapter/gate của stage từ CÙNG một
+    điểm khởi tạo (mỗi client tự tạo adapter ngẫu nhiên riêng thì trung bình các
+    adapter không liên quan là vô nghĩa). Từ round sau adapter/gate/stability của
+    client được giữ riêng như cũ.
 
     Khi bật personalized_adapter (PerFL) và task > 0: chỉ nạp các key chia sẻ
     (fc + convnet gốc đã đông cứng). GIỮ NGUYÊN toàn bộ nhánh cá nhân hóa của
     client: adapter, gate, và stability_encoder (vốn được hợp nhất từ adapter
     cá nhân hóa của các task trước nên cũng khác nhau giữa các client).
     """
-    if task > 0 and args.get("personalized_adapter", False):
+    if (task > 0 and args.get("personalized_adapter", False)
+            and not (stage_init and args.get("personalized_init_from_global", False))):
         own_state = local_model._network.state_dict()
         for k in own_state.keys():
             if k in global_state and not any(m in k for m in _PERSONALIZED_KEY_MARKERS):
@@ -935,7 +946,8 @@ def _train_federated(args):
             logging.info("Supervised task-incremental registration: computing prototypes from labeled task data.")
             client_protos = []
             for c in range(args["num_clients"]):
-                _load_global_into_client(local_models[c], global_model._network.state_dict(), task, args)
+                _load_global_into_client(local_models[c], global_model._network.state_dict(), task, args,
+                                         stage_init=True)
                 local_models[c]._network.to(args["device"][0])
                 old_protos = local_models[c].compute_local_prototypes(
                     client_dms[c],
@@ -1199,7 +1211,8 @@ def _train_federated(args):
 
                     for k in global_dict.keys():
                         if not is_aggregated_state_key(k, task, aggregate_backbone,
-                                       args.get("plastic_source_trainable", False)):
+                                       args.get("plastic_source_trainable", False),
+                                       args.get("shared_encoder_trainable", False)):
                             continue
                         # num_batches_tracked: trung bình có trọng số của một bộ
                         # đếm là vô nghĩa; lấy max cho đúng ngữ nghĩa "đã thấy

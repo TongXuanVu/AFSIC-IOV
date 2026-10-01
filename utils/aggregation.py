@@ -3,12 +3,16 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-def is_aggregated_state_key(key, task, aggregate_backbone=False, plastic_source=False):
+def is_aggregated_state_key(key, task, aggregate_backbone=False, plastic_source=False,
+                            shared_encoder=False):
     # Lưu ý PerFL (personalized_adapter): server VẪN aggregate adapter/gate để
     # global model có nhánh plasticity ý nghĩa khi đánh giá; tính cá nhân hóa
     # nằm ở phía client — client KHÔNG nạp đè adapter/gate cục bộ của mình
     # (xem trainer._load_global_into_client).
     if task == 0 or aggregate_backbone:
+        return True
+    # Dac ta 5.1: encoder dung chung duoc huan luyen o moi stage -> gop Delta theta.
+    if shared_encoder and "stability_encoder" in key:
         return True
     if "plasticity_adapter.frozen_source" in key:
         # Khi plastic_source_trainable=True, frozen_source la mot backbone DUOC
@@ -78,6 +82,7 @@ def compute_aggregation_weights(
     drift_mode = args.get("drift_mode", "vs_global")
     agg_bb = args.get("aggregate_backbone", False)
     plastic_src = args.get("plastic_source_trainable", False)
+    shared_enc = args.get("shared_encoder_trainable", False)
 
     # ── P1: chỉ đo Δθ trên THAM SỐ, không đo trên buffer ────────────────────
     # LỖI ĐÃ SỬA: vòng lặp cũ duyệt MỌI key của state_dict, nên bốn buffer
@@ -108,7 +113,7 @@ def compute_aggregation_weights(
         )
 
     def _is_measured(key, tensor):
-        if not is_aggregated_state_key(key, task, agg_bb, plastic_src):
+        if not is_aggregated_state_key(key, task, agg_bb, plastic_src, shared_enc):
             return False
         if legacy:
             return True
