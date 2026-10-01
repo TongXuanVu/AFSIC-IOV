@@ -292,9 +292,13 @@ class AFSICIDSNet(nn.Module):
 
         class FusedFeatureExtractor(nn.Module):
             def __init__(self, stability, plasticity, gate, expand,
-                         block_norm=False, num_blocks_prev=1, block_gamma=1.0):
+                         block_norm=False, num_blocks_prev=1, block_gamma=1.0,
+                         fusion_norm=False):
                 super().__init__()
                 self.stability = copy.deepcopy(stability)
+                # Bai bao 5.3: z = Norm(g*h_s + (1-g)*h_a). Mang chinh ap Norm khi
+                # gated_fusion_norm=True, nen nhanh stability cung PHAI ap Norm.
+                self.fusion_norm = bool(fusion_norm)
                 self.plasticity = copy.deepcopy(plasticity)
                 self.gate = copy.deepcopy(gate)
                 self.expand = bool(expand)
@@ -319,7 +323,10 @@ class AFSICIDSNet(nn.Module):
                             _n(g * a_x, 1.0),
                         ], dim=1)
                     return torch.cat([phi_x, g * a_x], dim=1)
-                return g * phi_x + (1.0 - g) * a_x
+                z = g * phi_x + (1.0 - g) * a_x
+                if self.fusion_norm:
+                    z = F.normalize(z, p=2, dim=1)
+                return z
             def forward(self, x):
                 return {"features": self.extract_vector(x)}
 
@@ -336,7 +343,8 @@ class AFSICIDSNet(nn.Module):
                 self.stability_encoder, self.plasticity_adapter, self.gate, _expand,
                 block_norm=self._block_norm,
                 num_blocks_prev=max(1, int(self._num_blocks) - 1),
-                block_gamma=self._block_gamma)
+                block_gamma=self._block_gamma,
+                fusion_norm=bool(self.args.get("gated_fusion_norm", False)))
             # Nhanh stability moi tai tao dung phep hop nhat cua task truoc,
             # nen so chieu cua no chinh la feature_dim TRUOC transition nay.
             self._stability_dim = self.feature_dim
