@@ -89,5 +89,8 @@
   "_comment_paper": "Dua ve dung tai lieu AFSIC-IoV: 5.1 encoder dung chung DONG BANG tu task 1; 5.2 adapter NHO (MLP bottleneck 31->64->64, ~6,2k tham so) doc thang dau vao tho h_a = A_psi(x) (adapter_input=raw), CA NHAN HOA tung client (personalized_adapter=true; personalized_init_from_global=true de moi client bat dau stage tu cung mot khoi tao); 5.3 z = Norm(g*h_s + (1-g)*h_a) (expand_feature_space=false, gated_fusion_norm=true); 5.4 P(y|x)=softmax(gamma*cos(z, p~_c)) khong co trong so phan loai hoc duoc (prototype_classifier, gamma=cosine_sigma=16 co dinh).",
   "adapter_input": "raw",
   "adapter_input_dim": 31,
-  "personalized_init_from_global": true
+  "personalized_init_from_global": true,
+  "adapter_identity_init": true,
+  "gate_init_bias": 0.0,
+  "_comment_identity_init": "adapter_identity_init: lop cuoi adapter raw = 0 va cong trong so 0/bias 0 (g=0,5 deu) => luc mo stage z == Norm(h_s), logit lop cu khong doi so voi task truoc. Do tren exemplar that: khoi tao ngau nhien chi cho cos(z, dac trung task 0)=0,56 -> Benign bi quen ngay round 1 (Old Acc 34%). Bai bao khong quy dinh khoi tao nen van dung 5.1-5.4."
 }

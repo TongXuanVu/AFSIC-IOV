@@ -456,6 +456,30 @@ class AFSICIDSNet(nn.Module):
             self.plasticity_adapter = BottleneckFeatureAdapter(
                 _source, _src_dim, bottleneck_dim, plastic=_plastic)
         self.gate = VectorGate(self._stability_dim, _src_dim if _expand else self._stability_dim)
+        # adapter_identity_init: khoi tao NHANH MOI SAO CHO z == dac trung cu luc mo stage.
+        #
+        # [DO tren mau exemplar that + checkpoint task 0, cau hinh afsic_paper_t14]
+        # Khoi tao ngau nhien (adapter raw 31->64->64, cong sigmoid ~0,5) cho
+        # |h_a| = 1,12 > |h_s| = 0,98, nen z = Norm(g*h_s + (1-g)*h_a) chi con cos
+        # 0,56 so voi dac trung task 0 (p10 0,39, min 0,19). Prototype lop cu
+        # (tinh tu h_s) vi vay khong con khop z ngay truoc khi huan luyen, va Benign
+        # bi keo sang prototype lop moi (Old Acc 34% o round 1 task 1).
+        #
+        # Cach lam: lop Linear CUOI cua adapter = 0 -> h_a = 0; cong: trong so = 0,
+        # bias = gate_init_bias (mac dinh 0 -> g = 0,5 DEU moi chieu). Khi do
+        # z = Norm(g*h_s) ~ h_s theo HUONG (g deu nen khong doi huong) => logit lop
+        # cu khong doi so voi mo hinh task truoc. Gradient van chay: dL/dW_cuoi =
+        # (kich hoat an)^T * dL/dh_a khac 0 vi (1-g) = 0,5. Chi ap cho adapter raw.
+        if bool(self.args.get("adapter_identity_init", False)):
+            _last = None
+            if _adapter_input == "raw":
+                _last = self.plasticity_adapter.adapter[-1]
+            if _last is not None:
+                nn.init.zeros_(_last.weight)
+                nn.init.zeros_(_last.bias)
+            _gl = self.gate.gate[0]
+            nn.init.zeros_(_gl.weight)
+            nn.init.constant_(_gl.bias, float(self.args.get("gate_init_bias", 0.0)))
         self.feature_dim = (self._stability_dim + _src_dim) if _expand else self._stability_dim
         # Cot dau tien cua khoi dac trung MOI (chi co nghia khi expand). Dung de
         # khoi tao phan trong so cua lop CU tren khoi moi (xem
