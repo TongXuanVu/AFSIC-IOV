@@ -465,14 +465,21 @@ def _calibrate_classifier_from_prototypes(model, is_task_init=False):
     # dung o lan goi duy nhat co y nghia (khoi tao task). Bo ve dung y nghia:
     # bat co -> chi ghi de trong so cua cac lop MOI, giu nguyen phan lop cu ma
     # cac task truoc da hoc.
-    if model.args.get("calibrate_new_classes_only", False) and not _proto_clf:
+    # prototype_classifier_keep_old (mac dinh false = hanh vi cu): bo phan loai
+    # prototype CHI cho lop MOI cua task hien tai; hang fc cua lop cu giu nguyen
+    # (da hoc o task truoc, dong bang vi requires_grad=False). Ly do: tren dac
+    # trung task 0, prototype Benign/DoS/double co cosine 0,99997-1,0 nen nearest-
+    # prototype khong tach duoc lop cu (recall [0,454; 0,058; 1,0]); fc hoc duoc cho
+    # [1,0; 0,011; 0,0] nhung giu duoc ranh gioi Benign.
+    _keep_old = _proto_clf and bool(model.args.get("prototype_classifier_keep_old", False))
+    if _keep_old or (model.args.get("calibrate_new_classes_only", False) and not _proto_clf):
         class_ids = range(model._known_classes, model._total_classes)
     else:
         class_ids = range(model._total_classes)
     # proto_init_center: tru tam cac lop CU truoc khi imprint (mac dinh tat).
     # Ly do: xem utils/inc_net.py::init_new_class_weights_from_prototypes
     _center = None
-    if (not _proto_clf) and model.args.get("proto_init_center", False) and model._known_classes > 0:
+    if ((not _proto_clf) or _keep_old) and model.args.get("proto_init_center", False) and model._known_classes > 0:
         _D = int(model._network.fc.weight.shape[1])
         _olds = []
         for _c in range(model._known_classes):
