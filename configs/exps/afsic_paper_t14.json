@@ -76,7 +76,6 @@
   "calibrate_once_per_task": false,
   "calibrate_new_classes_only": false,
   "expand_feature_space": false,
-  "replay_old_ratio": 0.2,
   "memory_ckpt_every": 10,
   "cosine_sigma": 16.0,
   "cosine_sigma_trainable": false,
