@@ -111,6 +111,10 @@ class AFSIC_IoV(AFSIC_IDS):
             return local_p
         rho = self._personalization_rho(class_id)
         mixed = rho * local_p + (1.0 - rho) * global_p.to(local_p.dtype)
+        # Dac ta 5.4: p~ = rho*p_local + (1-rho)*p_global, KHONG co Norm.
+        # proto_personalized_norm=True (mac dinh, hanh vi cu) thi chuan hoa L2.
+        if not self.args.get("proto_personalized_norm", True):
+            return mixed
         return mixed / (torch.norm(mixed, p=2) + 1e-8)
 
     def _get_reference_prototype(self, class_id):

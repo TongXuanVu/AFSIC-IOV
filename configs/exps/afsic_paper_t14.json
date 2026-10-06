@@ -73,6 +73,8 @@
   "force_rebuild_memory": false,
   "adapter_bottleneck": 64,
   "proto_rho_mode": "share",
+  "proto_size_term_mode": "raw",
+  "proto_personalized_norm": false,
   "calibrate_once_per_task": false,
   "calibrate_new_classes_only": false,
   "expand_feature_space": false,

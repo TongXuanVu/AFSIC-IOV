@@ -319,7 +319,9 @@ def _aggregate_client_prototypes(global_model, client_protos, num_clients, args=
     # "lay prototype cua client nhieu mau nhat cho lop do", bon so hang do tin
     # cay con lai nam duoi nguong nhieu. Chinh aggregation.py:56-61 da canh bao
     # dung hien tuong nay cho Q_i va da chuan hoa; nhanh prototype thi quen.
-    proto_size_mode = args.get("size_term_mode", "norm")
+    # Khoa rieng cho khau gop PROTOTYPE (khong dung chung voi Q_i). Dac ta 5.7:
+    # r_ic = beta1*log(1+n) - ... (log(1+n) tho) => "raw". Mac dinh: theo size_term_mode.
+    proto_size_mode = args.get("proto_size_term_mode", args.get("size_term_mode", "norm"))
 
     for class_id in range(global_model._total_classes):
         active_protos = []
