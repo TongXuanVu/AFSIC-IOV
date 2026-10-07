@@ -659,6 +659,22 @@ def _load_global_into_client(local_model, global_state, task, args, stage_init=F
         local_model._network.load_state_dict(global_state)
 
 
+def _client_own_classes(model):
+    """Cac lop client nay THAY trong du lieu huan luyen cua task hien tai
+    (lop moi cua no + lop cu co exemplar). Dung cache class_counts neu co."""
+    _ck = getattr(model, "_class_counts_cache", None)
+    if _ck is not None and _ck[0] == (model._cur_task, model._total_classes):
+        counts = _ck[1]
+    else:
+        loader = getattr(model, "train_loader", None)
+        if loader is None:
+            return []
+        counts = torch.zeros(model._total_classes)
+        for _, _, targets in loader:
+            counts += torch.bincount(targets.cpu(), minlength=model._total_classes).float()
+    return [int(i) for i in torch.nonzero(counts > 0).flatten().tolist()]
+
+
 def _eval_model_metrics(model, loader):
     """Đánh giá CNN head của model trên loader, trả về dict metrics."""
     model._network.eval()
@@ -721,6 +737,7 @@ def _train_federated(args):
         per_client_writer.writerow([
             "task", "round", "client", "acc", "f1_macro", "f1_weighted",
             "global_acc", "global_f1_macro", "gain_acc", "gain_f1_macro",
+            "own_classes", "f1_own", "rec_own", "global_f1_own", "gain_f1_own",
         ])
 
     _set_random()
@@ -1349,6 +1366,11 @@ def _train_federated(args):
                 round_idx == args["num_rounds"] - 1
                 or (eval_every > 0 and (round_idx + 1) % eval_every == 0)
             )
+            # per_client_eval_tasks (mac dinh None = moi task): chi danh gia mo hinh
+            # ca nhan hoa o cac task liet ke (vd [4]). Moi lan ~100 x 1 luot tap test.
+            _pc_tasks = args.get("per_client_eval_tasks")
+            if do_pc_eval and _pc_tasks is not None and task not in [int(x) for x in _pc_tasks]:
+                do_pc_eval = False
             if do_pc_eval:
                 for c in range(args["num_clients"]):
                     if local_models[c].train_loader is None:
@@ -1358,12 +1380,25 @@ def _train_federated(args):
                     # personalized prototypes của chính client.
                     _load_global_into_client(local_models[c], global_model._network.state_dict(), task, args)
                     _calibrate_classifier_from_prototypes(local_models[c])
-                    pc_metrics = _eval_model_metrics(local_models[c], global_model.test_loader)
+                    local_models[c]._network.eval()
+                    _pc_pred, _pc_true, _pc_loss = local_models[c]._eval_cnn(global_model.test_loader)
+                    pc_metrics = local_models[c]._evaluate(_pc_pred, _pc_true, loss=_pc_loss)
                     gain_acc = float(pc_metrics["top1"]) - float(cnn_accy["top1"])
                     gain_f1 = float(pc_metrics.get("f1_macro", 0)) - float(cnn_accy.get("f1_macro", 0))
+                    # F1 tren CAC LOP CLIENT NAY CO (lop moi cua task + lop cu co exemplar),
+                    # tinh tren TOAN BO tap test (false positive tu moi lop khac deu tinh).
+                    _own = _client_own_classes(local_models[c])
+                    _pc_top1 = _pc_pred[:, 0] if _pc_pred.ndim > 1 else _pc_pred.flatten()
+                    f1_own = rec_own = g_f1_own = float("nan")
+                    if _own:
+                        from sklearn.metrics import f1_score, recall_score
+                        f1_own = 100.0 * f1_score(_pc_true, _pc_top1, labels=_own, average="macro", zero_division=0)
+                        rec_own = 100.0 * recall_score(_pc_true, _pc_top1, labels=_own, average="macro", zero_division=0)
+                        g_f1_own = 100.0 * f1_score(y_true, y_top1, labels=_own, average="macro", zero_division=0)
                     logging.info(
                         f"[PerFL] Client {c}: Acc {pc_metrics['top1']:.2f}% (gain {gain_acc:+.2f}) | "
-                        f"F1-mac {pc_metrics.get('f1_macro', 0):.2f}% (gain {gain_f1:+.2f})"
+                        f"F1-mac {pc_metrics.get('f1_macro', 0):.2f}% (gain {gain_f1:+.2f}) | "
+                        f"lop rieng {_own}: F1 {f1_own:.2f} rec {rec_own:.2f} (global {g_f1_own:.2f}, gain {f1_own - g_f1_own:+.2f})"
                     )
                     per_client_writer.writerow([
                         task, round_idx + 1, c,
@@ -1374,6 +1409,8 @@ def _train_federated(args):
                         round(float(cnn_accy.get("f1_macro", 0)), 4),
                         round(gain_acc, 4),
                         round(gain_f1, 4),
+                        " ".join(str(x) for x in _own),
+                        round(f1_own, 4), round(rec_own, 4), round(g_f1_own, 4), round(f1_own - g_f1_own, 4),
                     ])
                 per_client_file.flush()
 
