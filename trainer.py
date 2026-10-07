@@ -645,8 +645,14 @@ def _load_global_into_client(local_model, global_state, task, args, stage_init=F
     if (task > 0 and args.get("personalized_adapter", False)
             and not (stage_init and args.get("personalized_init_from_global", False))):
         own_state = local_model._network.state_dict()
+        # Dac ta 5.1: khi encoder dung chung duoc huan luyen (server gop Delta theta),
+        # client phai NAP encoder toan cuc moi round; chi adapter/gate la ca nhan hoa.
+        # Mac dinh (shared_encoder_trainable=false) giu hanh vi cu.
+        _markers = _PERSONALIZED_KEY_MARKERS
+        if args.get("shared_encoder_trainable", False):
+            _markers = tuple(m for m in _markers if m != "stability_encoder")
         for k in own_state.keys():
-            if k in global_state and not any(m in k for m in _PERSONALIZED_KEY_MARKERS):
+            if k in global_state and not any(m in k for m in _markers):
                 own_state[k] = global_state[k]
         local_model._network.load_state_dict(own_state)
     else:

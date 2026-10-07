@@ -113,11 +113,33 @@ class AFSIC_IDS(BaseLearner):
         else:
             epoch_milestones = milestones
 
-        optimizer = optim.Adam(
-            filter(lambda p: p.requires_grad, params),
-            lr=lr,
-            weight_decay=self.args.get("weight_decay", 0.0002),
-        )
+        # lr_adapter (mac dinh None = hanh vi cu, mot lr chung): o stage tang
+        # truong, adapter + gate dung lr rieng; encoder dung chung / fc giu `lr`.
+        # Cung he so giam theo round voi `lr`.
+        _lr_ad = self.args.get("lr_adapter")
+        if self._cur_task > 0 and _lr_ad is not None:
+            _lr_ad = float(_lr_ad) * (lr / float(self.args.get("lr", 0.001)))
+            _ad_ids = set()
+            for _m in (self._network.plasticity_adapter, self._network.gate):
+                if _m is not None:
+                    _ad_ids.update(id(p) for p in _m.parameters())
+            _trainable = [p for p in params if p.requires_grad]
+            _g_ad = [p for p in _trainable if id(p) in _ad_ids]
+            _g_rest = [p for p in _trainable if id(p) not in _ad_ids]
+            _groups = [{"params": _g_ad, "lr": _lr_ad}]
+            if _g_rest:
+                _groups.append({"params": _g_rest, "lr": lr})
+            optimizer = optim.Adam(
+                _groups,
+                lr=lr,
+                weight_decay=self.args.get("weight_decay", 0.0002),
+            )
+        else:
+            optimizer = optim.Adam(
+                filter(lambda p: p.requires_grad, params),
+                lr=lr,
+                weight_decay=self.args.get("weight_decay", 0.0002),
+            )
         scheduler = optim.lr_scheduler.MultiStepLR(
             optimizer,
             milestones=epoch_milestones,

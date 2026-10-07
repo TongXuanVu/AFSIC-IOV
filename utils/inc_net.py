@@ -590,6 +590,20 @@ class AFSICIDSNet(nn.Module):
                 proto_norm = proto / (torch.norm(proto, p=2) + 1e-8)
                 self.fc.weight.data[cid] = proto_norm
 
+    def train(self, mode=True):
+        """shared_encoder_bn_eval (mac dinh false = hanh vi cu): khi encoder dung
+        chung duoc huan luyen, giu BatchNorm cua no o che do eval — trong so van
+        hoc, nhung running mean/var giu nguyen nhu task 0. Ly do: phan lon client
+        CAN-IoV chi co mot lop, thong ke theo lo cua tung client se keo lech dac
+        trung Benign."""
+        super().train(mode)
+        if (mode and self._shared_trainable and self.stability_encoder is not None
+                and self.args.get("shared_encoder_bn_eval", False)):
+            for _m in self.stability_encoder.modules():
+                if isinstance(_m, nn.modules.batchnorm._BatchNorm):
+                    _m.eval()
+        return self
+
     def get_trainable_incremental_params(self):
         params = []
         if self._shared_trainable and self.stability_encoder is not None:
