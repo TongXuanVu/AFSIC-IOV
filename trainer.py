@@ -1043,6 +1043,15 @@ def _train_federated(args):
                         local_models[c]._old_network.eval()
                         for p in local_models[c]._old_network.parameters():
                             p.requires_grad = False
+                    # Dac ta 5.4: P(y|x) = softmax(gamma*cos(z, p~_{i,c})) -> client phan loai
+                    # bang prototype CA NHAN HOA cua chinh no. fc vua nap tu server (prototype
+                    # toan cuc) duoc ghi lai bang p~ cua client truoc khi huan luyen. Voi
+                    # prototype_classifier_keep_old chi ghi hang lop moi. Mac dinh tat.
+                    # fc cua client KHONG lam hong fc toan cuc: sau moi lan gop server ghi
+                    # lai fc toan cuc bang prototype toan cuc.
+                    if (task > 0 and args.get("client_personalized_classifier", False)
+                            and args.get("prototype_classifier", False)):
+                        _calibrate_classifier_from_prototypes(local_models[c])
                 
                 local_models[c].args["epochs"] = args["local_epochs"]
                 local_models[c].args["start_round"] = 0
