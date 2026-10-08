@@ -195,7 +195,7 @@ def _build_standard_train_dataset(data_manager, local_model, args):
 
 
 def _build_local_eval_loader(data_manager, total_classes, batch_size, max_samples=None,
-                             seed=0):
+                             seed=0, use_test=False):
     """Tap danh gia CUC BO de tinh acc_i (dau vao cua beta_acc trong Q_i).
 
     TOI UU: chi client 0 co du lieu test, moi client khac roi xuong nhanh
@@ -204,11 +204,18 @@ def _build_local_eval_loader(data_manager, total_classes, batch_size, max_sample
     `max_samples` (config: quality_eval_max_samples) lay mau ngau nhien co dinh
     theo seed. Day la lay mau khi ĐO, khong cat du lieu huan luyen.
     Mac dinh None = giu nguyen hanh vi cu.
+
+    SUA RO RI TAP TEST: ban cu uu tien source="test", ma CHI client 0 duoc nap
+    global_test_data -> acc_i cua client 0 do tren CHINH tap test bao cao, roi
+    di vao Q_i -> trong so gop. Tu nay MOI client do tren du lieu HUAN LUYEN cua
+    minh. use_test=True (config legacy_quality_eval_on_test) chi de tai lap
+    cac lan chay cu.
     """
     indices = np.arange(0, total_classes)
+    _src = "test" if use_test else "train"
     if max_samples is None:
-        dataset = data_manager.get_dataset(indices, source="test", mode="test")
-        if len(dataset) == 0:
+        dataset = data_manager.get_dataset(indices, source=_src, mode="test")
+        if len(dataset) == 0 and use_test:
             dataset = data_manager.get_dataset(indices, source="train", mode="test")
         return make_loader(dataset, batch_size=batch_size, shuffle=False) if len(dataset) else None
 
@@ -219,8 +226,8 @@ def _build_local_eval_loader(data_manager, total_classes, batch_size, max_sample
     #      (client lon: 12,6 trieu x 31 float16 = 780 MB).
     # Cach dung: lay SubDummyDataset (vốn là VIEW) roi thay mang chi so cua no.
     from utils.data_manager import SubDummyDataset
-    dataset = data_manager.get_dataset(indices, source="test", mode="test")
-    if len(dataset) == 0:
+    dataset = data_manager.get_dataset(indices, source=_src, mode="test")
+    if len(dataset) == 0 and use_test:
         dataset = data_manager.get_dataset(indices, source="train", mode="test")
     if len(dataset) == 0:
         return None
@@ -1069,7 +1076,8 @@ def _train_federated(args):
                     quality_loader = _build_local_eval_loader(
                         client_dms[c], local_models[c]._total_classes, args["batch_size"],
                         max_samples=args.get("quality_eval_max_samples"),
-                        seed=args.get("seed", 0) + c)
+                        seed=args.get("seed", 0) + c,
+                        use_test=bool(args.get("legacy_quality_eval_on_test", False)))
                     if quality_loader is not None:
                         test_acc_dict = local_models[c]._compute_accuracy(local_models[c]._network, quality_loader)
                         client_accs.append(test_acc_dict["total"] / 100.0)
