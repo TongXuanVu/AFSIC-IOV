@@ -2,7 +2,7 @@
   "_chot": "Cau hinh DA RA ket qua chot cho bai bao (KetQuaChoPaper/iov, task 2-5), theo quyet dinh 09-10-2026 (nckh/quyet_dinh_viet_bai_AFSIC-IoV.md): KHONG chay lai, code va cau hinh dua ve khop ket qua. Noi dung = configs/exps/afsic_final_t14.json o commit 1c09c8d, KHONG doi gia tri nao; da doi chieu tung khoa voi dau training.log cua 3 phien (ketqua_afsic_final_t14, _1percent, _10shot): chi khac cach in device/seed.",
   "_commit": "1c09c8d (main luc chay 05-10/06-10-2026). Cac commit 48200e6..1c09c8d cho cung hanh vi voi cau hinh nay.",
   "_khong_chay_tren_main_moi": "Tu b0e93cf co che replay_old_ratio bi xoa khoi code va tu 1417446 acc_i cua client 0 khong con do tren tap test, nen chay file nay tren main hien tai se KHONG tai lap ket qua. Phai checkout 1c09c8d.",
-  "_lenh_full": "git checkout 1c09c8d && python main.py --config configs/exps/afsic_chot_ket_qua_t14.json --resume ckpt_task00_memory_client99.pth --resume_memory ckpt_task00_memory_client99_MEM.pth",
+  "_lenh_full": "git checkout 1c09c8d && python main.py --config configs/exps/afsic_final_paper.json --resume ckpt_task00_memory_client99.pth --resume_memory ckpt_task00_memory_client99_MEM.pth",
   "_bien_the_1percent": "Giong het, doi: fewshot_enabled=true, kshot=0.01, them eval_every_n_rounds=5 (phien ketqua_afsic_final_t14_1percent).",
   "_bien_the_10shot": "Giong het, doi: fewshot_enabled=true, kshot=10, them eval_every_n_rounds=5 (phien ketqua_afsic_final_t14_10shot).",
   "_task0": "Checkpoint nap vao (dataset Kaggle tongxuanvu/thankchua): trong so = phien full/task0_huanluyen_03-09-26_07-23 (configs/exps/afsic-iov-task0.json, commit 2875766, acc 99,67 / f1_macro 45,51); bo nho 1% = phien full/task0_memory1pct_05-10-26_07-19 (configs/exps/afsic-iov-task0-mem1pct.json).",
