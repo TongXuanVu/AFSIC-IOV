@@ -358,6 +358,16 @@ class AFSICIDSNet(nn.Module):
                 p.requires_grad = False
             self.convnet.eval()
             self._stability_dim = self.base_dim
+        elif bool(self.args.get("single_shared_encoder", False)):
+            # Dac ta 5.1/5.3: MOT encoder phi_theta dung chung duoc mang tu stage
+            # nay sang stage sau (khoi tao tu theta^{t-1}), KHONG boc long phep hop
+            # nhat cua stage truoc. Adapter va gate cua stage moi duoc tao lai o
+            # duoi. Mac dinh false = hanh vi cu (boc long, dung cho cac ket qua cu).
+            if not self.args.get("shared_encoder_trainable", False):
+                raise ValueError("single_shared_encoder yeu cau shared_encoder_trainable=true")
+            if _expand:
+                raise ValueError("single_shared_encoder khong dung chung voi expand_feature_space")
+            self._stability_dim = self.base_dim
         else:
             self.stability_encoder = FusedFeatureExtractor(
                 self.stability_encoder, self.plasticity_adapter, self.gate, _expand,

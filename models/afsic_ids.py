@@ -223,7 +223,11 @@ class AFSIC_IDS(BaseLearner):
                 features = outputs["features"]
                 
                 # a. Class-balanced CE Loss
-                loss_ce = F.cross_entropy(logits, targets, weight=class_weights)
+                # Dac ta (16): L_CE = -sum_{(x,y) in B} w_y log P(y|x), TONG khong chia.
+                # ce_reduction="sum" bat dung nhu vay; mac dinh "mean" = hanh vi cu.
+                loss_ce = F.cross_entropy(
+                    logits, targets, weight=class_weights,
+                    reduction=("sum" if self.args.get("ce_reduction", "mean") == "sum" else "mean"))
                 
                 # b. KD Loss on old classes
                 loss_kd = torch.tensor(0.0).to(self._device)

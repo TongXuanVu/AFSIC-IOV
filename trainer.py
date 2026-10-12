@@ -296,6 +296,35 @@ def _build_global_learned_test_loader(global_data_manager, total_classes, batch_
     return make_loader(dataset, batch_size=batch_size, shuffle=False)
 
 
+def _quality_eval_per_class(model, loader, total_classes):
+    """Mot luot do tren du lieu huan luyen cuc bo: (acc tong, {lop: recall}).
+
+    q_{i,c} (dac ta 5.7, "diem tin cay" theo lop): recall cua lop c cua CHINH client i
+    tren du lieu cua no, sau huan luyen cuc bo. Cung luot forward voi acc_i, khong
+    them chi phi. Lop client khong co mau thi KHONG co khoa trong dict.
+    """
+    model._network.eval()
+    hit = torch.zeros(total_classes)
+    cnt = torch.zeros(total_classes)
+    prior_bias, prior_ready = None, False
+    with torch.no_grad():
+        for _, inputs, targets in loader:
+            inputs = inputs.to(model._device)
+            out = model._network(inputs)["logits"]
+            if not prior_ready:
+                prior_bias = model._logit_prior_bias(out.shape[1], out.device)
+                prior_ready = True
+            if prior_bias is not None:
+                out = out + prior_bias.unsqueeze(0)
+            pred = out.argmax(dim=1).cpu()
+            t = targets.cpu()
+            cnt += torch.bincount(t, minlength=total_classes).float()[:total_classes]
+            hit += torch.bincount(t[pred == t], minlength=total_classes).float()[:total_classes]
+    n = float(cnt.sum())
+    acc = float(hit.sum()) / n if n > 0 else 0.0
+    return acc, {int(c): float(hit[c] / cnt[c]) for c in range(total_classes) if cnt[c] > 0}
+
+
 def _aggregate_client_prototypes(global_model, client_protos, num_clients, args=None, client_stats=None):
     """Per-class reliability-aware prototype aggregation (AFSIC-IoV).
 
@@ -347,6 +376,10 @@ def _aggregate_client_prototypes(global_model, client_protos, num_clients, args=
             sigma_ic = float(info.get("dispersion", 0.0))
             stats = (client_stats or {}).get(c, {})
             q_i = float(stats.get("q", 0.0))
+            # proto_q_mode="class_recall": q_{i,c} do CLIENT tinh theo tung lop va gui kem
+            # prototype (dac ta 5.7). Mac dinh "alpha": q = alpha_i cua server (cu).
+            if (args or {}).get("proto_q_mode", "alpha") == "class_recall":
+                q_i = float(info.get("q_class", 0.0))
             drift_i = float(stats.get("drift", 0.0))
             upd_i = float(stats.get("update_norm", 0.0))
 
@@ -1078,9 +1111,15 @@ def _train_federated(args):
                         max_samples=args.get("quality_eval_max_samples"),
                         seed=args.get("seed", 0) + c,
                         use_test=bool(args.get("legacy_quality_eval_on_test", False)))
+                    _q_class = {}
                     if quality_loader is not None:
-                        test_acc_dict = local_models[c]._compute_accuracy(local_models[c]._network, quality_loader)
-                        client_accs.append(test_acc_dict["total"] / 100.0)
+                        if args.get("proto_q_mode", "alpha") == "class_recall":
+                            _acc_i, _q_class = _quality_eval_per_class(
+                                local_models[c], quality_loader, local_models[c]._total_classes)
+                            client_accs.append(_acc_i)
+                        else:
+                            test_acc_dict = local_models[c]._compute_accuracy(local_models[c]._network, quality_loader)
+                            client_accs.append(test_acc_dict["total"] / 100.0)
                     else:
                         client_accs.append(0.0)
                     
@@ -1123,6 +1162,8 @@ def _train_federated(args):
                     protos = {}
                     protos.update(old_protos)
                     protos.update(new_protos)
+                    for _cid, _info in protos.items():
+                        _info["q_class"] = _q_class.get(int(_cid), 0.0)
                     client_protos.append(protos)
                 else:
                     client_accs.append(0.0)
@@ -1229,7 +1270,8 @@ def _train_federated(args):
                     for k in global_dict.keys():
                         if not is_aggregated_state_key(k, task, aggregate_backbone,
                                        args.get("plastic_source_trainable", False),
-                                       args.get("shared_encoder_trainable", False)):
+                                       args.get("shared_encoder_trainable", False),
+                                       bool(args.get("aggregate_encoder_only", False))):
                             continue
                         # num_batches_tracked: trung bình có trọng số của một bộ
                         # đếm là vô nghĩa; lấy max cho đúng ngữ nghĩa "đã thấy
@@ -1325,6 +1367,14 @@ def _train_federated(args):
             total_params = sum(p.numel() for p in global_model._network.parameters())
             trainable_params = sum(p.numel() for p in global_model._network.parameters() if p.requires_grad)
             comm_cost = trainable_params * 4 / (1024 * 1024) # MB
+            if args.get("aggregate_encoder_only", False) and task > 0:
+                # Byte THAT cua dac ta 5.7: Delta theta encoder (tham so huan luyen duoc)
+                # + moi lop mot prototype D chieu va 3 so (n, sigma, q). Can tren: client
+                # giu du moi lop da biet.
+                _enc = sum(p.numel() for n_, p in global_model._network.named_parameters()
+                           if p.requires_grad and "stability_encoder" in n_)
+                _D = int(global_model._network.feature_dim)
+                comm_cost = (_enc + global_model._total_classes * (_D + 3)) * 4 / (1024 * 1024)
             
             # Forgetting theo đúng ranh giới task (dùng task_increments thay vì
             # group keys 10 lớp cố định vốn không khớp với increments lệch nhau)
