@@ -1093,6 +1093,23 @@ def _train_federated(args):
                             and args.get("prototype_classifier", False)):
                         _calibrate_classifier_from_prototypes(local_models[c])
                 
+                # quality_mode="improvement" (mac dinh "acc" = hanh vi cu): do recall tung
+                # lop cua client TRUOC khi train cuc bo (mo hinh vua nap tu server), de sau
+                # train lay acc_i = trung binh (recall sau - recall truoc) tren cac lop
+                # client co. Client day duoc lop moi thi duoc thuong; client ma mo hinh da
+                # doan dung san (Benign) thi ~0. Phá vong lap "acc_i = 0 cho client giu
+                # lop tan cong" (log ban chot: 61/100 client acc_i <= 1%).
+                _q_before, _q_loader = None, None
+                if _is_afsic(args) and args.get("quality_mode", "acc") == "improvement":
+                    _q_loader = _build_local_eval_loader(
+                        client_dms[c], local_models[c]._total_classes, args["batch_size"],
+                        max_samples=args.get("quality_eval_max_samples"),
+                        seed=args.get("seed", 0) + c,
+                        use_test=bool(args.get("legacy_quality_eval_on_test", False)))
+                    if _q_loader is not None:
+                        _, _q_before = _quality_eval_per_class(
+                            local_models[c], _q_loader, local_models[c]._total_classes)
+
                 local_models[c].args["epochs"] = args["local_epochs"]
                 local_models[c].args["start_round"] = 0
                 local_models[c]._train(local_models[c].train_loader, None)
@@ -1106,14 +1123,25 @@ def _train_federated(args):
                 if _is_afsic(args):
                     # Fast eval for client quality validation Acc
                     local_models[c]._network.eval()
-                    quality_loader = _build_local_eval_loader(
+                    quality_loader = _q_loader if _q_loader is not None else _build_local_eval_loader(
                         client_dms[c], local_models[c]._total_classes, args["batch_size"],
                         max_samples=args.get("quality_eval_max_samples"),
                         seed=args.get("seed", 0) + c,
                         use_test=bool(args.get("legacy_quality_eval_on_test", False)))
                     _q_class = {}
                     if quality_loader is not None:
-                        if args.get("proto_q_mode", "alpha") == "class_recall":
+                        if _q_before is not None:
+                            _acc_after, _q_class = _quality_eval_per_class(
+                                local_models[c], quality_loader, local_models[c]._total_classes)
+                            _gain = [_q_class[k] - _q_before.get(k, 0.0) for k in _q_class]
+                            _acc_i = float(np.mean(_gain)) if _gain else 0.0
+                            client_accs.append(_acc_i)
+                            logging.info(
+                                f"[IMPROVE] Task {task} R{round_idx+1} Client {c} | acc_i (muc cai thien) "
+                                f"{_acc_i*100:+.2f} | acc tong sau train {_acc_after*100:.2f}% | " +
+                                " ".join(f"{k}:{_q_before.get(k, 0.0)*100:.1f}->{v*100:.1f}"
+                                         for k, v in sorted(_q_class.items())))
+                        elif args.get("proto_q_mode", "alpha") == "class_recall":
                             _acc_i, _q_class = _quality_eval_per_class(
                                 local_models[c], quality_loader, local_models[c]._total_classes)
                             client_accs.append(_acc_i)
