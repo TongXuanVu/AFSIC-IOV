@@ -1672,8 +1672,10 @@ def _train_federated(args):
     logging.info("Training Finished.")
 
 
-_CALIB_TAUS_DEFAULT = [-1.0, -0.6, -0.4, -0.3, -0.2, -0.15, -0.1, -0.05, -0.02, 0.0,
-                       0.02, 0.05, 0.08, 0.11, 0.14, 0.18, 0.22, 0.3, 0.45, 0.6, 1.0]
+# Luoi tau: bias = tau*log pi. Tren CAN-IoV do trai log pi ~9 va logit cosine
+# chenh toi da 2*sigma = 32, nen |tau| > ~3,5 la bao hoa (moi mau ve mot lop).
+_CALIB_TAUS_DEFAULT = [-3.0, -2.0, -1.5, -1.0, -0.6, -0.4, -0.3, -0.2, -0.15, -0.1, -0.05, -0.02, 0.0,
+                       0.02, 0.05, 0.08, 0.11, 0.14, 0.18, 0.22, 0.3, 0.45, 0.6, 1.0, 1.5, 2.0, 3.0]
 
 
 def _calib_loader(data_manager, total_classes, batch_size, cap, seed):
