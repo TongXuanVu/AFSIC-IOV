@@ -190,6 +190,23 @@ class AFSIC_IDS(BaseLearner):
                 class_weights[c] = 1.0
         class_weights = class_weights / class_weights.mean().clamp_min(1e-12)
 
+        # FedRS (Li & Zhan, KDD 2021) - restricted softmax cho nhan lech giua client.
+        # Logit cua lop client KHONG co mau (trong du lieu task nay + exemplar) nhan
+        # fedrs_alpha truoc softmax cua CE. Client mot lop vi vay chi day dac trung ra
+        # xa prototype cua lop no chua tung thay voi luc giam alpha lan. Chi ap vao
+        # CE; KD/FSP/proto giu nguyen. Mac dinh TAT (local_loss_mode="ce").
+        _fedrs = self.args.get("local_loss_mode", "ce") == "fedrs"
+        _rs_mask = None
+        if _fedrs:
+            _a = float(self.args.get("fedrs_alpha", 0.5))
+            _rs_mask = torch.where(class_counts > 0, torch.ones_like(class_counts),
+                                   torch.full_like(class_counts, _a)).float()
+            if getattr(self, "_fedrs_logged", None) != self._cur_task:   # mot dong moi client moi task
+                self._fedrs_logged = self._cur_task
+                logging.info("[FedRS] alpha={} | lop client co: {} | lop bi gioi han: {}".format(
+                    _a, [int(c) for c in torch.nonzero(class_counts > 0).flatten().tolist()],
+                    [int(c) for c in torch.nonzero(class_counts <= 0).flatten().tolist()]))
+
         # Save model params at start of local training round for FedProx
         self.global_model_params_round_start = {
             name: p.clone().detach()
@@ -225,8 +242,9 @@ class AFSIC_IDS(BaseLearner):
                 # a. Class-balanced CE Loss
                 # Dac ta (16): L_CE = -sum_{(x,y) in B} w_y log P(y|x), TONG khong chia.
                 # ce_reduction="sum" bat dung nhu vay; mac dinh "mean" = hanh vi cu.
+                _ce_logits = logits * _rs_mask.unsqueeze(0) if _rs_mask is not None else logits
                 loss_ce = F.cross_entropy(
-                    logits, targets, weight=class_weights,
+                    _ce_logits, targets, weight=class_weights,
                     reduction=("sum" if self.args.get("ce_reduction", "mean") == "sum" else "mean"))
                 
                 # b. KD Loss on old classes
