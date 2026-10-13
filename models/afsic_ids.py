@@ -190,6 +190,27 @@ class AFSIC_IDS(BaseLearner):
                 class_weights[c] = 1.0
         class_weights = class_weights / class_weights.mean().clamp_min(1e-12)
 
+        # Logit-adjusted loss (Menon et al., ICLR 2021): CE tren logit + la_tau*log pi,
+        # pi = tan suat lop TOAN CUC (so dem server gui xuong qua global_proto_memory).
+        # Mo hinh phai hoc sao cho lop hiem van thang du lop pho bien duoc cong san
+        # diem -> ranh gioi Benign / tan cong dat dung cho ngay luc train. Thay cho
+        # trong so lop (config dat class_weight_power=0). Chi thay CE; KD/FSP/proto
+        # giu nguyen. Mac dinh TAT (local_loss_mode="ce").
+        _la_bias = None
+        if self.args.get("local_loss_mode", "ce") == "logit_adjusted":
+            _cnt = self._class_prior_counts(self._total_classes)
+            _src = "toan cuc"
+            if _cnt is None:
+                _cnt = (class_counts.float().clamp_min(1.0)).tolist()
+                _src = "CUC BO (thieu so dem toan cuc)"
+            _n = torch.tensor(_cnt, dtype=torch.float64)
+            _la_bias = (float(self.args.get("la_tau", 1.0)) *
+                        torch.log(_n / _n.sum() + 1e-12)).float().to(self._device)
+            if getattr(self, "_la_logged", None) != self._cur_task:   # mot dong moi client moi task
+                self._la_logged = self._cur_task
+                logging.info("[LA-loss] tau={} | prior {} | bias = {}".format(
+                    self.args.get("la_tau", 1.0), _src, [round(float(v), 2) for v in _la_bias]))
+
         # Save model params at start of local training round for FedProx
         self.global_model_params_round_start = {
             name: p.clone().detach()
@@ -225,8 +246,9 @@ class AFSIC_IDS(BaseLearner):
                 # a. Class-balanced CE Loss
                 # Dac ta (16): L_CE = -sum_{(x,y) in B} w_y log P(y|x), TONG khong chia.
                 # ce_reduction="sum" bat dung nhu vay; mac dinh "mean" = hanh vi cu.
+                _ce_logits = logits + _la_bias.unsqueeze(0) if _la_bias is not None else logits
                 loss_ce = F.cross_entropy(
-                    logits, targets, weight=class_weights,
+                    _ce_logits, targets, weight=class_weights,
                     reduction=("sum" if self.args.get("ce_reduction", "mean") == "sum" else "mean"))
                 
                 # b. KD Loss on old classes
