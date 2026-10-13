@@ -190,6 +190,21 @@ class AFSIC_IDS(BaseLearner):
                 class_weights[c] = 1.0
         class_weights = class_weights / class_weights.mean().clamp_min(1e-12)
 
+        # FedLC (Zhang et al., ICML 2022) - hieu chinh logit theo phan bo nhan CUC BO.
+        # Logit lop c bi tru tau*n_c^(-1/4), n_c = so mau lop c cua client (du lieu task
+        # nay + exemplar); lop client khong co mau tinh nhu n_c = 1 (bi tru nhieu nhat).
+        # Loss = -log( exp(cal_y) / sum_{y' != y} exp(cal_y') ) nhu ban cai dat chinh
+        # thuc (mau so bo lop dung). Giu trong so lop va ce_reduction nhu CE goc.
+        # Chi thay CE; KD/FSP/proto giu nguyen. Mac dinh TAT (local_loss_mode="ce").
+        _fedlc_shift = None
+        if self.args.get("local_loss_mode", "ce") == "fedlc":
+            _t = float(self.args.get("fedlc_tau", 1.0))
+            _fedlc_shift = _t * class_counts.float().clamp_min(1.0).pow(-0.25)
+            if getattr(self, "_fedlc_logged", None) != self._cur_task:   # mot dong moi client moi task
+                self._fedlc_logged = self._cur_task
+                logging.info("[FedLC] tau={} | tru vao logit = {}".format(
+                    _t, [round(float(v), 3) for v in _fedlc_shift]))
+
         # Save model params at start of local training round for FedProx
         self.global_model_params_round_start = {
             name: p.clone().detach()
@@ -225,9 +240,18 @@ class AFSIC_IDS(BaseLearner):
                 # a. Class-balanced CE Loss
                 # Dac ta (16): L_CE = -sum_{(x,y) in B} w_y log P(y|x), TONG khong chia.
                 # ce_reduction="sum" bat dung nhu vay; mac dinh "mean" = hanh vi cu.
-                loss_ce = F.cross_entropy(
-                    logits, targets, weight=class_weights,
-                    reduction=("sum" if self.args.get("ce_reduction", "mean") == "sum" else "mean"))
+                if _fedlc_shift is not None:
+                    _cal = logits - _fedlc_shift.unsqueeze(0)
+                    _y = _cal.gather(1, targets.unsqueeze(1)).squeeze(1)
+                    _oth = _cal.masked_fill(F.one_hot(targets, _cal.shape[1]).bool(), float("-inf"))
+                    _per = torch.logsumexp(_oth, dim=1) - _y
+                    _wy = class_weights[targets]
+                    loss_ce = ((_per * _wy).sum() if self.args.get("ce_reduction", "mean") == "sum"
+                               else (_per * _wy).sum() / _wy.sum().clamp_min(1e-12))
+                else:
+                    loss_ce = F.cross_entropy(
+                        logits, targets, weight=class_weights,
+                        reduction=("sum" if self.args.get("ce_reduction", "mean") == "sum" else "mean"))
                 
                 # b. KD Loss on old classes
                 loss_kd = torch.tensor(0.0).to(self._device)
