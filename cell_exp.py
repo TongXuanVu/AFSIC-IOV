@@ -1,28 +1,43 @@
-import csv, glob, json, os, re, shutil, subprocess, sys, time, zipfile
+import csv, glob, json, os, re, shutil, signal, subprocess, sys, time, zipfile
 
-# CELL CHAY MOT PHUONG AN (moi nhanh git = mot phuong an, mot phien Kaggle chay du task 2-5).
-# Chi can doi BRANCH (va SCENARIO neu chay few-shot). Moi thu khac tu suy ra.
+# CELL CHAY MOT PHUONG AN (moi nhanh git = mot phuong an).
+#   RESUME = None  -> chay TU DAU (task 1 tro di), CUNG mot cau hinh cho moi task.
+#   RESUME = "ten_thu_muc"  -> chay TIEP tu checkpoint cuoi task cua lan chay truoc
+#                              (Add Input output cua notebook truoc; cell tu tim file).
+# Cell tu dung truoc gioi han 12 gio cua Kaggle (TIME_BUDGET_H), dong goi ket qua cac
+# task da xong va in ra file checkpoint de chay tiep.
 BRANCH = "exp/doi-chung"   # exp/doi-chung | exp/q-cai-thien | exp/fedrs | exp/fedlc | exp/logit-prior
 SCENARIO = "full"          # "full" | "1percent" | "10shot"
+RESUME = None              # None = tu dau; hoac ten thu muc trong /kaggle/input chua ckpt_taskXX_memory_client99*.pth
+TIME_BUDGET_H = 11.3       # dung main.py sau ngan nay gio de con thoi gian dong goi
 
 CONFIGS = {"exp/doi-chung": "exp_doi_chung", "exp/q-cai-thien": "exp_q_cai_thien",
            "exp/fedrs": "exp_fedrs", "exp/fedlc": "exp_fedlc", "exp/logit-prior": "exp_logit_prior"}
 REPO = "https://github.com/TongXuanVu/AFSIC-IOV.git"
 WORK = "/kaggle/working"
 CODE = os.path.join(WORK, "AFSIC-IOV")
+T_START = time.time()
 assert BRANCH in CONFIGS and SCENARIO in ("full", "1percent", "10shot")
 BASE_NAME = CONFIGS[BRANCH]
 CONFIG_NAME = f"{BASE_NAME}_{SCENARIO}"
 CONFIG = f"configs/exps/{CONFIG_NAME}.json"
 
-mdl = glob.glob("/kaggle/input/**/ckpt_task00_memory_client99.pth", recursive=True)
-mem = glob.glob("/kaggle/input/**/ckpt_task00_memory_client99_MEM.pth", recursive=True)
-assert mdl and mem, "Chua Add Input cap file ckpt_task00_memory_client99.pth + ..._MEM.pth"
-MDL, MEM = mdl[0], mem[0]
-assert os.path.getsize(MEM) > 50e6, f"File MEM qua nho ({os.path.getsize(MEM)/1e6:.0f} MB) - sai file?"
 assert glob.glob("/kaggle/input/**/federated_data/client_*_task_*.pt", recursive=True) and \
        glob.glob("/kaggle/input/**/global_test_data.pt", recursive=True), "Thieu dataset IoV 100 client"
-print("[input]", MDL, "|", MEM)
+RESUME_ARGS = []
+if RESUME:
+    cands = glob.glob(f"/kaggle/input/**/{RESUME}/**/ckpt_task*_memory_client99.pth", recursive=True) + \
+            glob.glob(f"/kaggle/input/**/{RESUME}/ckpt_task*_memory_client99.pth", recursive=True)
+    cands = sorted(set(cands), key=lambda p: int(re.search(r"ckpt_task(\d+)_memory", p).group(1)))
+    assert cands, f"Khong thay ckpt_taskXX_memory_client99.pth trong /kaggle/input/**/{RESUME}"
+    MDL = cands[-1]
+    MEM = MDL.replace(".pth", "_MEM.pth")
+    assert os.path.exists(MEM), f"Thieu {MEM}"
+    RESUME_ARGS = ["--resume", MDL, "--resume_memory", MEM]
+    _t_done = int(re.search(r"ckpt_task(\d+)_memory", MDL).group(1))
+    print(f"[resume] da xong task {_t_done} (dem tu 0) -> chay tiep tu task {_t_done + 1} | file {MDL}")
+else:
+    print("[tu dau] chay task 1 tro di voi cung cau hinh cua nhanh")
 
 shutil.rmtree(CODE, ignore_errors=True)
 subprocess.run(["git", "clone", "-q", "--depth", "1", "--branch", BRANCH, REPO, CODE], check=True)
@@ -36,10 +51,9 @@ if SCENARIO == "1percent":
     cfg.update(fewshot_enabled=True, kshot=0.01, eval_every_n_rounds=5)
 elif SCENARIO == "10shot":
     cfg.update(fewshot_enabled=True, kshot=10, eval_every_n_rounds=5)
-cfg.pop("max_tasks", None)                      # chay du task 1..4 trong MOT phien
+cfg.pop("max_tasks", None)
 json.dump(cfg, open(CONFIG, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
-# Phan chung cua moi phuong an + nen bam bai
 for k, v in {"shared_encoder_trainable": True, "single_shared_encoder": True, "aggregate_encoder_only": True,
              "adapter_input": "raw", "personalized_adapter": True, "prototype_classifier": True,
              "proto_q_mode": "class_recall", "decision_calibration": True, "log_client_recall": True,
@@ -53,22 +67,36 @@ print(f"[config] {CONFIG_NAME} | quality_mode={cfg.get('quality_mode', 'acc')} |
       f"local_loss_mode={cfg.get('local_loss_mode', 'ce')} | class_weight_power={cfg.get('class_weight_power')} | "
       f"fewshot={cfg['fewshot_enabled']} kshot={cfg['kshot']}")
 
-t0 = time.time()
-subprocess.run([sys.executable, "main.py", "--config", CONFIG, "--resume", MDL, "--resume_memory", MEM], check=False)
-print(f"\n[xong] {(time.time()-t0)/3600:.2f} gio")
+# Chay main.py, tu dung truoc gioi han phien. Log van in thang ra o cell.
+budget_s = TIME_BUDGET_H * 3600 - (time.time() - T_START)
+proc = subprocess.Popen([sys.executable, "main.py", "--config", CONFIG] + RESUME_ARGS)
+stopped = False
+try:
+    proc.wait(timeout=max(60, budget_s))
+except subprocess.TimeoutExpired:
+    stopped = True
+    print(f"\n[het gio] dung main.py sau {TIME_BUDGET_H} gio de dong goi ket qua")
+    proc.send_signal(signal.SIGTERM)
+    try:
+        proc.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+print(f"\n[xong] {(time.time() - T_START) / 3600:.2f} gio | {'DUNG GIUA CHUNG' if stopped else 'chay het'}")
 
 runs = sorted(glob.glob("logs/afsic-iov_federated/can_iov/*_clients100"), key=os.path.getmtime)
 assert runs, "Khong thay thu muc log"
 run = runs[-1]
-open(os.path.join(run, "CODE_COMMIT.txt"), "w").write(f"{BRANCH} @ {COMMIT}\nconfig {CONFIG_NAME}\n")
+open(os.path.join(run, "CODE_COMMIT.txt"), "w").write(
+    f"{BRANCH} @ {COMMIT}\nconfig {CONFIG_NAME}\nresume {RESUME_ARGS[1] if RESUME_ARGS else 'tu dau'}\n")
 rows = [r for r in csv.reader(open(os.path.join(run, "metrics_round_by_round.csv"), encoding="utf-8-sig"))
         if r and r[0] != "task" and len(r) >= 15]
+print("\nTASK (dem tu 0) | f1_mac round cuoi da chay | max | so round")
 for t in sorted({int(r[0]) for r in rows}):
     f1 = [float(r[12]) for r in rows if int(r[0]) == t]
-    print(f"task {t}: f1_mac cuoi {f1[-1]:.2f} | max {max(f1):.2f}")
+    print(f"task {t}: f1_mac cuoi {f1[-1]:.2f} | max {max(f1):.2f} | {len(f1)} round")
 cal = os.path.join(run, "calibration.csv")
 if os.path.exists(cal):
-    print("\nHIEU CHINH QUYET DINH (tau chon tren du lieu client, khong dung tap test):")
+    print("\nHIEU CHINH QUYET DINH cuoi moi task (tau chon tren du lieu client, khong dung tap test):")
     print(f"{'task':>4}{'tau*':>7}{'f1 goc':>9}{'f1 hieu chinh':>15}{'acc goc':>9}{'acc hc':>8}")
     crow = list(csv.DictReader(open(cal, encoding="utf-8")))
     for t in sorted({int(r["task"]) for r in crow}):
@@ -78,13 +106,22 @@ if os.path.exists(cal):
         print(f"{t:>4}{float(sel['tau']):>7.2f}{float(raw['test_f1_macro']):>9.2f}{float(sel['test_f1_macro']):>15.2f}"
               f"{float(raw['test_acc']):>9.2f}{float(sel['test_acc']):>8.2f}")
 
-zpath = os.path.join(WORK, f"ketqua_{CONFIG_NAME}.zip")
+done = sorted(glob.glob(os.path.join(run, "checkpoints", "ckpt_task*_memory_client99.pth")))
+if done:
+    print(f"\n[chay tiep] checkpoint cuoi task moi nhat: {os.path.basename(done[-1])} (+ _MEM.pth).")
+    print("  Save Version notebook nay, o phien sau Add Input output cua no va dat RESUME = ten thu muc output do.")
+else:
+    print("\n[chay tiep] chua co checkpoint cuoi task nao (chua xong task 1 + pha bo nho).")
+
+# Zip nhe: log, CSV, PNG va checkpoint CUOI TASK (de chay tiep). Checkpoint tung round van nam
+# trong /kaggle/working cua output nhung khong dua vao zip cho gon.
+zpath = os.path.join(WORK, f"ketqua_{CONFIG_NAME}{'_resume' if RESUME else ''}.zip")
 with zipfile.ZipFile(zpath, "w", allowZip64=True) as z:
     for root, _, files in os.walk(run):
         for fn in sorted(files):
-            if re.match(r"ckpt_task\d+_memory_client(?!99)\d+", fn):
+            if fn.endswith(".pth") and not re.match(r"ckpt_task\d+_memory_client99(_MEM)?\.pth$", fn):
                 continue
             full = os.path.join(root, fn)
             arc = os.path.join(os.path.basename(run), os.path.relpath(full, run))
             z.write(full, arc, compress_type=zipfile.ZIP_STORED if fn.endswith(".pth") else zipfile.ZIP_DEFLATED)
-print(f"[zip] {zpath} ({os.path.getsize(zpath)/1e9:.2f} GB)")
+print(f"[zip] {zpath} ({os.path.getsize(zpath) / 1e9:.2f} GB)")
