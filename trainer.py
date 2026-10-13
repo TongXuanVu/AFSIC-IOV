@@ -1756,12 +1756,13 @@ def _decision_calibration(global_model, client_dms, args, task, run_dir):
         w = csv.writer(fh)
         if new:
             w.writerow(["task", "tau", "selected", "client_data_f1_macro", "test_acc", "test_f1_macro",
-                        "test_rec_macro", "test_prec_macro"] + [f"f1_{n}" for n in ten])
+                        "test_rec_macro", "test_prec_macro", "test_f1_tung_lop"])
         for t in sorted(taus):
             m = _metrics_tu_cm(test_cms[t])
             res[t] = m
             w.writerow([task, t, int(t == tau_star), calib_f1[t], m["top1"], m["f1_macro"],
-                        m["recall_macro"], m["precision_macro"]] + m["_f1_per_class"])
+                        m["recall_macro"], m["precision_macro"],
+                        " ".join(f"{n}:{v}" for n, v in zip(ten, m["_f1_per_class"]))])
     raw, cal = res[0.0], res[tau_star]
     oracle_t = max(res, key=lambda t: res[t]["f1_macro"])
     logging.info(
