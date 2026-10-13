@@ -1117,6 +1117,10 @@ def _train_federated(args):
                             _acc_i, _q_class = _quality_eval_per_class(
                                 local_models[c], quality_loader, local_models[c]._total_classes)
                             client_accs.append(_acc_i)
+                            if args.get("log_client_recall", False):
+                                logging.info(
+                                    f"[RECALL] Task {task} R{round_idx+1} Client {c} | acc {_acc_i*100:.2f}% | "
+                                    "recall " + " ".join(f"{k}:{v*100:.1f}" for k, v in sorted(_q_class.items())))
                         else:
                             test_acc_dict = local_models[c]._compute_accuracy(local_models[c]._network, quality_loader)
                             client_accs.append(test_acc_dict["total"] / 100.0)
@@ -1427,6 +1431,12 @@ def _train_federated(args):
             ])
             csv_file.flush()
 
+            # Hieu chinh quyet dinh cuoi task (decision_calibration, mac dinh TAT).
+            # Chi doi cach DOC ket qua (argmax logit + tau*log pi), khong doi mo hinh.
+            if (args.get("decision_calibration", False) and _is_afsic(args)
+                    and round_idx == args["num_rounds"] - 1):
+                _decision_calibration(global_model, client_dms, args, task, run_dir)
+
             # ── Đánh giá per-client (PerFL): personalized model vs global model ──
             eval_every = int(args.get("per_client_eval_every", 0))  # 0 = chỉ round cuối task
             do_pc_eval = _is_afsic(args) and args.get("per_client_eval", True) and (
@@ -1662,7 +1672,110 @@ def _train_federated(args):
     logging.info("Training Finished.")
 
 
-def _sweep_tau_one_pass(global_model, loader, num_classes, taus):
+_CALIB_TAUS_DEFAULT = [-1.0, -0.6, -0.4, -0.3, -0.2, -0.15, -0.1, -0.05, -0.02, 0.0,
+                       0.02, 0.05, 0.08, 0.11, 0.14, 0.18, 0.22, 0.3, 0.45, 0.6, 1.0]
+
+
+def _calib_loader(data_manager, total_classes, batch_size, cap, seed):
+    """Du lieu HUAN LUYEN cua mot client (moi lop da hoc) de hieu chinh quyet dinh.
+
+    Lay toi da `cap` mau MOI LOP (ngau nhien, co dinh theo seed) va tra ve he so
+    nhan scale[c] = n_c / m_c de ma tran nham lan duoc NHAN NGUOC ve dung so mau
+    that (uoc luong khong chech). Khong cat du lieu huan luyen: chi lay mau khi DO.
+    Tra ve (loader, scale) hoac (None, None) neu client khong co du lieu.
+    """
+    from utils.data_manager import SubDummyDataset
+    dataset = data_manager.get_dataset(np.arange(0, total_classes), source="train", mode="test")
+    if len(dataset) == 0:
+        return None, None
+    scale = np.ones(total_classes, dtype=np.float64)
+    if cap and isinstance(dataset, SubDummyDataset) and dataset.append_x is None:
+        idx = np.asarray(dataset.indices)
+        lab = np.asarray(dataset.y_source)[idx]
+        rng = np.random.default_rng(seed)
+        keep = []
+        for c in np.unique(lab):
+            pos = np.nonzero(lab == c)[0]
+            if len(pos) > cap:
+                scale[int(c)] = len(pos) / float(cap)
+                pos = pos[np.sort(rng.choice(len(pos), size=int(cap), replace=False))]
+            keep.append(pos)
+        keep = np.sort(np.concatenate(keep))
+        if len(keep) < len(idx):
+            dataset = SubDummyDataset(dataset.x_source, dataset.y_source, idx[keep],
+                                      dataset.trsf, dataset.use_path, None)
+    return make_loader(dataset, batch_size=batch_size, shuffle=False), scale
+
+
+def _decision_calibration(global_model, client_dms, args, task, run_dir):
+    """Hieu chinh quyet dinh cuoi task (logit adjustment, Menon et al. ICLR 2021).
+
+    Du doan = argmax(logit + tau * log pi), pi = tan suat lop toan cuc (so mau
+    huan luyen that, server da co tu khau gop prototype). tau duoc CHON KHONG
+    DUNG TAP TEST: moi client tinh ma tran nham lan cua mo hinh toan cuc tren du
+    lieu cua chinh no cho tung tau trong luoi, chi GUI SO DEM len server; server
+    cong lai va chon tau cho F1 macro cao nhat. Sau do mot luot qua tap test cho
+    moi tau trong luoi (chi de bao cao; tau dung cho ket qua la tau da chon).
+    Khong doi mo hinh, khong doi qua trinh hoc.
+    """
+    K = int(global_model._total_classes)
+    taus = [float(t) for t in (args.get("calib_taus") or _CALIB_TAUS_DEFAULT)]
+    if 0.0 not in taus:
+        taus.append(0.0)
+    cap = args.get("calib_max_per_class", 20000)
+    agg = {t: np.zeros((K, K), dtype=np.float64) for t in taus}
+    n_cl = 0
+    for c in range(args["num_clients"]):
+        loader, scale = _calib_loader(client_dms[c], K, args["batch_size"], cap,
+                                      seed=args.get("seed", 0) + 7919 * (task + 1) + c)
+        if loader is None:
+            continue
+        cms = _sweep_tau_one_pass(global_model, loader, K, taus, verbose=False)
+        if not cms:
+            return None
+        for t in taus:
+            agg[t] += np.asarray(cms[t], dtype=np.float64) * scale[:, None]
+        n_cl += 1
+    if n_cl == 0:
+        logging.warning("[CALIB] khong client nao co du lieu -> bo qua hieu chinh.")
+        return None
+    calib_f1 = {t: _metrics_tu_cm(agg[t])["f1_macro"] for t in taus}
+    best = max(calib_f1.values())
+    tau_star = min((t for t in taus if calib_f1[t] == best), key=lambda t: (abs(t), t))
+
+    test_cms = _sweep_tau_one_pass(global_model, global_model.test_loader, K, taus, verbose=True)
+    if not test_cms:
+        return None
+    ten = _ten_lop(K)
+    out_csv = os.path.join(run_dir, "calibration.csv")
+    new = not os.path.exists(out_csv)
+    res = {}
+    with open(out_csv, "a", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        if new:
+            w.writerow(["task", "tau", "selected", "client_data_f1_macro", "test_acc", "test_f1_macro",
+                        "test_rec_macro", "test_prec_macro"] + [f"f1_{n}" for n in ten])
+        for t in sorted(taus):
+            m = _metrics_tu_cm(test_cms[t])
+            res[t] = m
+            w.writerow([task, t, int(t == tau_star), calib_f1[t], m["top1"], m["f1_macro"],
+                        m["recall_macro"], m["precision_macro"]] + m["_f1_per_class"])
+    raw, cal = res[0.0], res[tau_star]
+    oracle_t = max(res, key=lambda t: res[t]["f1_macro"])
+    logging.info(
+        f"[CALIB] Task {task}: tau*={tau_star:+.2f} (chon tren du lieu {n_cl} client, F1 {best:.2f}) | "
+        f"TEST f1_mac {raw['f1_macro']:.2f} -> {cal['f1_macro']:.2f} | acc {raw['top1']:.2f} -> {cal['top1']:.2f} | "
+        f"(tham khao, KHONG dung de chon: tau tot nhat tren test {oracle_t:+.2f} -> {res[oracle_t]['f1_macro']:.2f})")
+    logging.info("[CALIB]   F1 tung lop sau hieu chinh = {}".format(dict(zip(ten, cal["_f1_per_class"]))))
+    try:
+        _luu_confusion_csv(np.asarray(test_cms[tau_star]), ten,
+                           os.path.join(run_dir, f"confusion_matrix_task_{task:02d}_calib.csv"))
+    except Exception as e:
+        logging.warning(f"[CALIB] khong ghi duoc confusion CSV: {e}")
+    return {"tau": tau_star, "raw": raw, "calibrated": cal}
+
+
+def _sweep_tau_one_pass(global_model, loader, num_classes, taus, verbose=True):
     """
     Quet nhieu gia tri tau trong MOT lan chay qua tap test.
 
@@ -1679,8 +1792,9 @@ def _sweep_tau_one_pass(global_model, loader, num_classes, taus):
         return None
     n = torch.tensor(counts, dtype=torch.float64)
     log_pi = torch.log(n / n.sum() + 1e-12).float().to(global_model._device)
-    logging.info("[TEST] counts = {}".format(counts))
-    logging.info("[TEST] log_pi = {}".format([round(float(v), 4) for v in log_pi]))
+    if verbose:
+        logging.info("[TEST] counts = {}".format(counts))
+        logging.info("[TEST] log_pi = {}".format([round(float(v), 4) for v in log_pi]))
 
     # sigma quyet dinh DAI TAU dung duoc. Bo phan loai la CosineLinear nen
     # logit = sigma*cos, cos trong [-1,1] => chenh lech logit giua hai lop
@@ -1692,7 +1806,7 @@ def _sweep_tau_one_pass(global_model, loader, num_classes, taus):
             _sig = float(_p)
             break
     _spread = float(log_pi.max() - log_pi.min())
-    if _sig is not None and _spread > 0:
+    if verbose and _sig is not None and _spread > 0:
         logging.info(
             "[TEST] sigma = {:.4f} -> bien do logit toi da 2*sigma = {:.4f}; "
             "do trai prior = {:.4f} => tau bao hoa quanh {:.3f}".format(
