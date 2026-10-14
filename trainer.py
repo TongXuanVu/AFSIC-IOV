@@ -1433,9 +1433,14 @@ def _train_federated(args):
 
             # Hieu chinh quyet dinh cuoi task (decision_calibration, mac dinh TAT).
             # Chi doi cach DOC ket qua (argmax logit + tau*log pi), khong doi mo hinh.
+            # calib_every_n_rounds: 0 (mac dinh) = chi round cuoi task; N = them moi N round
+            # (chi ghi dong tom tat calibration_by_round.csv, de ve duong cong theo round).
+            _ce = int(args.get("calib_every_n_rounds", 0) or 0)
+            _last_round = (round_idx == args["num_rounds"] - 1)
             if (args.get("decision_calibration", False) and _is_afsic(args)
-                    and round_idx == args["num_rounds"] - 1):
-                _decision_calibration(global_model, client_dms, args, task, run_dir)
+                    and (_last_round or (_ce > 0 and (round_idx + 1) % _ce == 0))):
+                _decision_calibration(global_model, client_dms, args, task, run_dir,
+                                      round_idx=round_idx, full=_last_round)
 
             # ── Đánh giá per-client (PerFL): personalized model vs global model ──
             eval_every = int(args.get("per_client_eval_every", 0))  # 0 = chỉ round cuối task
@@ -1709,7 +1714,7 @@ def _calib_loader(data_manager, total_classes, batch_size, cap, seed):
     return make_loader(dataset, batch_size=batch_size, shuffle=False), scale
 
 
-def _decision_calibration(global_model, client_dms, args, task, run_dir):
+def _decision_calibration(global_model, client_dms, args, task, run_dir, round_idx=None, full=True):
     """Hieu chinh quyet dinh cuoi task (logit adjustment, Menon et al. ICLR 2021).
 
     Du doan = argmax(logit + tau * log pi), pi = tan suat lop toan cuc (so mau
@@ -1719,6 +1724,10 @@ def _decision_calibration(global_model, client_dms, args, task, run_dir):
     cong lai va chon tau cho F1 macro cao nhat. Sau do mot luot qua tap test cho
     moi tau trong luoi (chi de bao cao; tau dung cho ket qua la tau da chon).
     Khong doi mo hinh, khong doi qua trinh hoc.
+
+    Moi lan goi ghi MOT dong tom tat vao calibration_by_round.csv (de ve duong
+    cong theo round). full=True (round cuoi task) ghi them calibration.csv day du
+    moi tau va confusion_matrix_task_XX_calib.csv.
     """
     K = int(global_model._total_classes)
     taus = [float(t) for t in (args.get("calib_taus") or _CALIB_TAUS_DEFAULT)]
@@ -1749,22 +1758,52 @@ def _decision_calibration(global_model, client_dms, args, task, run_dir):
     if not test_cms:
         return None
     ten = _ten_lop(K)
+    res = {t: _metrics_tu_cm(test_cms[t]) for t in taus}
+    raw, cal = res[0.0], res[tau_star]
+    oracle_t = max(res, key=lambda t: res[t]["f1_macro"])
+    kc = int(getattr(global_model, "_known_classes", 0))
+
+    def _old_new(cm):
+        cm = np.asarray(cm, dtype=np.float64)
+        d = np.diag(cm)
+        o = 100.0 * d[:kc].sum() / max(1.0, cm[:kc].sum()) if kc > 0 else 0.0
+        n = 100.0 * d[kc:].sum() / max(1.0, cm[kc:].sum()) if kc < K else 0.0
+        return round(o, 2), round(n, 2)
+
+    r_old, r_new = _old_new(test_cms[0.0])
+    c_old, c_new = _old_new(test_cms[tau_star])
+    rnd = (round_idx + 1) if round_idx is not None else args["num_rounds"]
+    by_round = os.path.join(run_dir, "calibration_by_round.csv")
+    _new_br = not os.path.exists(by_round)
+    with open(by_round, "a", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        if _new_br:
+            w.writerow(["task", "round", "global_round", "tau_star", "client_data_f1_macro",
+                        "raw_acc", "raw_f1_macro", "raw_old_acc", "raw_new_acc",
+                        "cal_acc", "cal_f1_macro", "cal_rec_macro", "cal_prec_macro", "cal_old_acc", "cal_new_acc",
+                        "cal_f1_tung_lop"])
+        w.writerow([task, rnd, task * int(args["num_rounds"]) + rnd, tau_star, best,
+                    raw["top1"], raw["f1_macro"], r_old, r_new,
+                    cal["top1"], cal["f1_macro"], cal["recall_macro"], cal["precision_macro"], c_old, c_new,
+                    " ".join(f"{n}:{v}" for n, v in zip(ten, cal["_f1_per_class"]))])
+    logging.info(
+        f"[CALIB-R] Task {task} R{rnd}: tau*={tau_star:+.2f} | f1_mac {raw['f1_macro']:.2f} -> {cal['f1_macro']:.2f} | "
+        f"acc {raw['top1']:.2f} -> {cal['top1']:.2f} | new acc {r_new:.2f} -> {c_new:.2f}")
+    if not full:
+        return {"tau": tau_star, "raw": raw, "calibrated": cal}
+
     out_csv = os.path.join(run_dir, "calibration.csv")
     new = not os.path.exists(out_csv)
-    res = {}
     with open(out_csv, "a", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         if new:
             w.writerow(["task", "tau", "selected", "client_data_f1_macro", "test_acc", "test_f1_macro",
                         "test_rec_macro", "test_prec_macro", "test_f1_tung_lop"])
         for t in sorted(taus):
-            m = _metrics_tu_cm(test_cms[t])
-            res[t] = m
+            m = res[t]
             w.writerow([task, t, int(t == tau_star), calib_f1[t], m["top1"], m["f1_macro"],
                         m["recall_macro"], m["precision_macro"],
                         " ".join(f"{n}:{v}" for n, v in zip(ten, m["_f1_per_class"]))])
-    raw, cal = res[0.0], res[tau_star]
-    oracle_t = max(res, key=lambda t: res[t]["f1_macro"])
     logging.info(
         f"[CALIB] Task {task}: tau*={tau_star:+.2f} (chon tren du lieu {n_cl} client, F1 {best:.2f}) | "
         f"TEST f1_mac {raw['f1_macro']:.2f} -> {cal['f1_macro']:.2f} | acc {raw['top1']:.2f} -> {cal['top1']:.2f} | "
