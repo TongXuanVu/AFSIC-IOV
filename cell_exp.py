@@ -1,14 +1,19 @@
 import csv, glob, json, os, re, shutil, signal, subprocess, sys, time, zipfile
 
 # CELL CHAY MOT PHUONG AN (moi nhanh git = mot phuong an).
-#   RESUME = None  -> chay TU DAU (task 1 tro di), CUNG mot cau hinh cho moi task.
-#   RESUME = "ten_thu_muc"  -> chay TIEP tu checkpoint cuoi task cua lan chay truoc
-#                              (Add Input output cua notebook truoc; cell tu tim file).
+#   RESUME = None    -> chay TU DAU (task 1 tro di), CUNG mot cau hinh cho moi task.
+#   RESUME = "auto"  -> tu tim ckpt_taskXX_memory_client99.pth trong /kaggle/input
+#   RESUME = "ten_thu_muc" -> chi tim trong thu muc input do
+#   RESUME_TASK = None -> lay checkpoint task cao nhat tim thay; so nguyen -> dung task do
+#                         (vd 0 = sau task 1, dung cho 1percent/10shot vi task 1 giong full)
+#   EVAL_EVERY = 1   -> danh gia + hieu chinh MOI round (de ve do thi theo round)
 # Cell tu dung truoc gioi han 12 gio cua Kaggle (TIME_BUDGET_H), dong goi ket qua cac
 # task da xong va in ra file checkpoint de chay tiep.
 BRANCH = "exp/doi-chung"   # exp/doi-chung | exp/q-cai-thien | exp/fedrs | exp/fedlc | exp/logit-prior
 SCENARIO = "full"          # "full" | "1percent" | "10shot"
-RESUME = None              # None = tu dau; hoac ten thu muc trong /kaggle/input chua ckpt_taskXX_memory_client99*.pth
+RESUME = None              # None | "auto" | ten thu muc trong /kaggle/input
+RESUME_TASK = None         # None = task cao nhat; 0 = checkpoint sau task 1
+EVAL_EVERY = 1             # 1 = moi round (do thi theo round); 5 = nhanh hon
 TIME_BUDGET_H = 11.3       # dung main.py sau ngan nay gio de con thoi gian dong goi
 
 CONFIGS = {"exp/doi-chung": "exp_doi_chung", "exp/q-cai-thien": "exp_q_cai_thien",
@@ -26,10 +31,15 @@ assert glob.glob("/kaggle/input/**/federated_data/client_*_task_*.pt", recursive
        glob.glob("/kaggle/input/**/global_test_data.pt", recursive=True), "Thieu dataset IoV 100 client"
 RESUME_ARGS = []
 if RESUME:
-    cands = glob.glob(f"/kaggle/input/**/{RESUME}/**/ckpt_task*_memory_client99.pth", recursive=True) + \
-            glob.glob(f"/kaggle/input/**/{RESUME}/ckpt_task*_memory_client99.pth", recursive=True)
+    if RESUME == "auto":
+        cands = glob.glob("/kaggle/input/**/ckpt_task*_memory_client99.pth", recursive=True)
+    else:
+        cands = glob.glob(f"/kaggle/input/**/{RESUME}/**/ckpt_task*_memory_client99.pth", recursive=True) + \
+                glob.glob(f"/kaggle/input/**/{RESUME}/ckpt_task*_memory_client99.pth", recursive=True)
+    if RESUME_TASK is not None:
+        cands = [p for p in cands if int(re.search(r"ckpt_task(\d+)_memory", p).group(1)) == int(RESUME_TASK)]
     cands = sorted(set(cands), key=lambda p: int(re.search(r"ckpt_task(\d+)_memory", p).group(1)))
-    assert cands, f"Khong thay ckpt_taskXX_memory_client99.pth trong /kaggle/input/**/{RESUME}"
+    assert cands, f"Khong thay ckpt_taskXX_memory_client99.pth (RESUME={RESUME}, RESUME_TASK={RESUME_TASK})"
     MDL = cands[-1]
     MEM = MDL.replace(".pth", "_MEM.pth")
     assert os.path.exists(MEM), f"Thieu {MEM}"
@@ -48,9 +58,10 @@ print("[code]", BRANCH, "@", COMMIT, "|", subprocess.check_output(["git", "log",
 cfg = json.load(open(f"configs/exps/{BASE_NAME}.json", encoding="utf-8"))
 cfg = {k: v for k, v in cfg.items() if not k.startswith("_")}
 if SCENARIO == "1percent":
-    cfg.update(fewshot_enabled=True, kshot=0.01, eval_every_n_rounds=5)
+    cfg.update(fewshot_enabled=True, kshot=0.01)
 elif SCENARIO == "10shot":
-    cfg.update(fewshot_enabled=True, kshot=10, eval_every_n_rounds=5)
+    cfg.update(fewshot_enabled=True, kshot=10)
+cfg["eval_every_n_rounds"] = int(EVAL_EVERY)
 cfg.pop("max_tasks", None)
 json.dump(cfg, open(CONFIG, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
@@ -61,11 +72,13 @@ for k, v in {"shared_encoder_trainable": True, "single_shared_encoder": True, "a
     assert cfg.get(k) == v, f"{k}={cfg.get(k)!r}, can {v!r}"
 _src = "".join(open(f, encoding="utf-8").read() for f in
                ("trainer.py", "models/afsic_ids.py", "utils/inc_net.py", "utils/aggregation.py"))
-for _f in ("_decision_calibration", "log_client_recall", "single_shared_encoder", "aggregate_encoder_only"):
+assert int(cfg.get("calib_every_n_rounds", 0) or 0) == 1, "Code tren GitHub chua phai ban HC moi round - chua push?"
+for _f in ("_decision_calibration", "_calib_loader_fewshot", "log_client_recall", "single_shared_encoder",
+           "aggregate_encoder_only"):
     assert _f in _src, f"Code chua co {_f} - sai nhanh?"
 print(f"[config] {CONFIG_NAME} | quality_mode={cfg.get('quality_mode', 'acc')} | "
       f"local_loss_mode={cfg.get('local_loss_mode', 'ce')} | class_weight_power={cfg.get('class_weight_power')} | "
-      f"fewshot={cfg['fewshot_enabled']} kshot={cfg['kshot']}")
+      f"fewshot={cfg['fewshot_enabled']} kshot={cfg['kshot']} | eval_every={cfg['eval_every_n_rounds']}")
 
 # Chay main.py, tu dung truoc gioi han phien. Log van in thang ra o cell.
 budget_s = TIME_BUDGET_H * 3600 - (time.time() - T_START)
@@ -109,7 +122,7 @@ if os.path.exists(cal):
 done = sorted(glob.glob(os.path.join(run, "checkpoints", "ckpt_task*_memory_client99.pth")))
 if done:
     print(f"\n[chay tiep] checkpoint cuoi task moi nhat: {os.path.basename(done[-1])} (+ _MEM.pth).")
-    print("  Save Version notebook nay, o phien sau Add Input output cua no va dat RESUME = ten thu muc output do.")
+    print("  Save Version notebook nay, o phien sau Add Input output cua no, RESUME='auto', RESUME_TASK=None.")
 else:
     print("\n[chay tiep] chua co checkpoint cuoi task nao (chua xong task 1 + pha bo nho).")
 

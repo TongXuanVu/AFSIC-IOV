@@ -1683,15 +1683,26 @@ _CALIB_TAUS_DEFAULT = [-3.0, -2.0, -1.5, -1.0, -0.6, -0.4, -0.3, -0.2, -0.15, -0
                        0.02, 0.05, 0.08, 0.11, 0.14, 0.18, 0.22, 0.3, 0.45, 0.6, 1.0, 1.5, 2.0, 3.0]
 
 
-def _calib_loader(data_manager, total_classes, batch_size, cap, seed):
+def _calib_loader(data_manager, total_classes, batch_size, cap, seed,
+                  kshot=None, fewshot_seed=None, client_id=0):
     """Du lieu HUAN LUYEN cua mot client (moi lop da hoc) de hieu chinh quyet dinh.
 
     Lay toi da `cap` mau MOI LOP (ngau nhien, co dinh theo seed) va tra ve he so
     nhan scale[c] = n_c / m_c de ma tran nham lan duoc NHAN NGUOC ve dung so mau
     that (uoc luong khong chech). Khong cat du lieu huan luyen: chi lay mau khi DO.
     Tra ve (loader, scale) hoac (None, None) neu client khong co du lieu.
+
+    Kich ban few-shot (kshot khac None: 10shot / 1%): client CHI co nhan cua
+    dung cac mau k-shot da dung de train o moi task >= 1. Hieu chinh chi duoc
+    dung DUNG cac mau do (chon lai bang cung seed nhu _build_fewshot_train_dataset:
+    fewshot_seed + t*1009 + client_id*9173, duyet lop theo cung thu tu), khong
+    duoc dung phan du lieu co nhan con lai -> khong ro ri nhan ngoai kich ban.
+    Lop cua task 0 (base, du du lieu) giu nguyen cach lay nhu kich ban full.
     """
     from utils.data_manager import SubDummyDataset
+    if kshot is not None:
+        return _calib_loader_fewshot(data_manager, total_classes, batch_size, cap, seed,
+                                     kshot, fewshot_seed, client_id)
     dataset = data_manager.get_dataset(np.arange(0, total_classes), source="train", mode="test")
     if len(dataset) == 0:
         return None, None
@@ -1711,6 +1722,51 @@ def _calib_loader(data_manager, total_classes, batch_size, cap, seed):
         if len(keep) < len(idx):
             dataset = SubDummyDataset(dataset.x_source, dataset.y_source, idx[keep],
                                       dataset.trsf, dataset.use_path, None)
+    return make_loader(dataset, batch_size=batch_size, shuffle=False), scale
+
+
+def _calib_loader_fewshot(data_manager, total_classes, batch_size, cap, seed,
+                          kshot, fewshot_seed, client_id):
+    """Ban few-shot cua _calib_loader (xem chu thich o do)."""
+    from utils.data_manager import SubDummyDataset
+    y = np.asarray(data_manager._train_targets)
+    incs = [int(v) for v in getattr(data_manager, "_increments", [])]
+    bounds, acc = [], 0
+    for n in incs:
+        bounds.append((acc, acc + n))
+        acc += n
+    scale = np.ones(total_classes, dtype=np.float64)
+    parts = []
+    rng_cap = np.random.default_rng(seed)
+    for t, (lo, hi) in enumerate(bounds):
+        if lo >= total_classes:
+            break
+        hi = min(hi, total_classes)
+        if t == 0:
+            for c in range(lo, hi):
+                pos = np.nonzero(y == c)[0]
+                if len(pos) == 0:
+                    continue
+                if cap and len(pos) > cap:
+                    scale[c] = len(pos) / float(cap)
+                    pos = pos[np.sort(rng_cap.choice(len(pos), size=int(cap), replace=False))]
+                parts.append(pos)
+        else:
+            # Cung rng va cung thu tu lop nhu luc train task t -> dung tap k-shot do.
+            rng = np.random.default_rng(fewshot_seed + t * 1009 + client_id * 9173)
+            for c in range(lo, hi):
+                pos = np.nonzero(y == c)[0]
+                if len(pos) == 0:
+                    continue
+                k = _resolve_kshot(kshot, len(pos))
+                if k is not None:
+                    pos = pos[rng.choice(len(pos), size=min(k, len(pos)), replace=False)]
+                parts.append(np.sort(pos))
+    if not parts:
+        return None, None
+    idx = np.sort(np.concatenate(parts))
+    dataset = SubDummyDataset(data_manager._train_data, y, idx,
+                              _make_transform(data_manager, "test"), data_manager.use_path, None)
     return make_loader(dataset, batch_size=batch_size, shuffle=False), scale
 
 
@@ -1737,8 +1793,11 @@ def _decision_calibration(global_model, client_dms, args, task, run_dir, round_i
     agg = {t: np.zeros((K, K), dtype=np.float64) for t in taus}
     n_cl = 0
     for c in range(args["num_clients"]):
+        _fs_k = (args.get("kshot", None)
+                 if args.get("fewshot_enabled", False) and args.get("kshot", None) is not None else None)
         loader, scale = _calib_loader(client_dms[c], K, args["batch_size"], cap,
-                                      seed=args.get("seed", 0) + 7919 * (task + 1) + c)
+                                      seed=args.get("seed", 0) + 7919 * (task + 1) + c,
+                                      kshot=_fs_k, fewshot_seed=args.get("seed", 0), client_id=c)
         if loader is None:
             continue
         cms = _sweep_tau_one_pass(global_model, loader, K, taus, verbose=False)
