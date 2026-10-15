@@ -758,16 +758,30 @@ def _train_federated(args):
         handlers=[logging.FileHandler(filename=logfilename), logging.StreamHandler(sys.stdout)],
     )
 
+    # metrics_round_by_round.csv = KET QUA CUOI CUNG moi round: neu bat
+    # decision_calibration thi la so SAU hieu chinh tau* (cot "tau_star"),
+    # nguoc lai la so goc. So goc (truoc hieu chinh) luon co o
+    # metrics_round_by_round_raw.csv cung dinh dang.
+    _METRIC_HEADER = [
+        "task", "round", "global_round", "method",
+        "acc", "prec_mic", "prec_mac", "prec_wei",
+        "rec_mic", "rec_mac", "rec_wei",
+        "f1_mic", "f1_mac", "f1_wei", "loss", "avg_acc",
+    ]
+
+    def _open_metric_csv(path, header):
+        _need_hdr = (not args.get("resume")) or (not os.path.exists(path)) or os.path.getsize(path) == 0
+        fh = open(path, "a" if args.get("resume") else "w", newline="", encoding="utf-8")
+        wr = csv.writer(fh)
+        if _need_hdr:
+            wr.writerow(header)
+        return fh, wr
+
     csv_path = os.path.join(run_dir, "metrics_round_by_round.csv")
-    csv_file = open(csv_path, "a" if args.get("resume") else "w", newline="", encoding="utf-8")
-    csv_writer = csv.writer(csv_file)
-    if not args.get("resume"):
-        csv_writer.writerow([
-            "task", "round", "global_round", "method",
-            "acc", "prec_mic", "prec_mac", "prec_wei",
-            "rec_mic", "rec_mac", "rec_wei",
-            "f1_mic", "f1_mac", "f1_wei", "loss", "avg_acc",
-        ])
+    csv_file, csv_writer = _open_metric_csv(csv_path, _METRIC_HEADER + ["tau_star"])
+    raw_csv_file, raw_csv_writer = _open_metric_csv(
+        os.path.join(run_dir, "metrics_round_by_round_raw.csv"), _METRIC_HEADER)
+    results_final = []
 
     # CSV per-client (PerFL): F1 của model cá nhân hóa từng client + personalization gain
     per_client_csv_path = os.path.join(run_dir, "metrics_per_client.csv")
@@ -1413,34 +1427,54 @@ def _train_federated(args):
                 f"Params: {total_params:,} | Comm Cost: {comm_cost:.2f} MB"
             )
 
-            # Ghi file CSV
-            csv_writer.writerow([
-                task, round_idx + 1, global_round + 1, str(args["model_name"]).upper(),
-                round(cnn_accy["top1"], 4),
-                round(cnn_accy.get("precision_micro", 0), 4),
-                round(cnn_accy.get("precision_macro", 0), 4),
-                round(cnn_accy.get("precision_weighted", 0), 4),
-                round(cnn_accy.get("recall_micro", 0), 4),
-                round(cnn_accy.get("recall_macro", 0), 4),
-                round(cnn_accy.get("recall_weighted", 0), 4),
-                round(cnn_accy.get("f1_micro", 0), 4),
-                round(cnn_accy.get("f1_macro", 0), 4),
-                round(cnn_accy.get("f1_weighted", 0), 4),
-                round(cnn_accy.get("loss", 0), 6),
-                round(avg_acc, 4),
-            ])
-            csv_file.flush()
-
-            # Hieu chinh quyet dinh cuoi task (decision_calibration, mac dinh TAT).
+            # Hieu chinh quyet dinh (decision_calibration, mac dinh TAT).
             # Chi doi cach DOC ket qua (argmax logit + tau*log pi), khong doi mo hinh.
-            # calib_every_n_rounds: 0 (mac dinh) = chi round cuoi task; N = them moi N round
-            # (chi ghi dong tom tat calibration_by_round.csv, de ve duong cong theo round).
+            # calib_every_n_rounds: 0 (mac dinh) = chi round cuoi task; N = them moi N round.
             _ce = int(args.get("calib_every_n_rounds", 0) or 0)
             _last_round = (round_idx == args["num_rounds"] - 1)
+            _cal_res = None
             if (args.get("decision_calibration", False) and _is_afsic(args)
                     and (_last_round or (_ce > 0 and (round_idx + 1) % _ce == 0))):
-                _decision_calibration(global_model, client_dms, args, task, run_dir,
-                                      round_idx=round_idx, full=_last_round)
+                _cal_res = _decision_calibration(global_model, client_dms, args, task, run_dir,
+                                                 round_idx=round_idx, full=_last_round)
+
+            def _metric_row(m, avg, extra=()):
+                return [
+                    task, round_idx + 1, global_round + 1, str(args["model_name"]).upper(),
+                    round(m["top1"], 4),
+                    round(m.get("precision_micro", 0), 4),
+                    round(m.get("precision_macro", 0), 4),
+                    round(m.get("precision_weighted", 0), 4),
+                    round(m.get("recall_micro", 0), 4),
+                    round(m.get("recall_macro", 0), 4),
+                    round(m.get("recall_weighted", 0), 4),
+                    round(m.get("f1_micro", 0), 4),
+                    round(m.get("f1_macro", 0), 4),
+                    round(m.get("f1_weighted", 0), 4),
+                    round(cnn_accy.get("loss", 0), 6),   # loss huan luyen/danh gia goc
+                    round(avg, 4),
+                ] + list(extra)
+
+            # So goc (truoc hieu chinh)
+            raw_csv_writer.writerow(_metric_row(cnn_accy, avg_acc))
+            raw_csv_file.flush()
+
+            # So cuoi cung: sau hieu chinh neu co, nguoc lai la so goc
+            if _cal_res is not None and _cal_res.get("calibrated") is not None:
+                final_accy = _cal_res["calibrated"]
+                _tau_cell = _cal_res["tau"]
+            else:
+                final_accy = cnn_accy
+                _tau_cell = ""
+            results_final.append(final_accy)
+            avg_acc_final = sum(r["top1"] for r in results_final) / len(results_final)
+            csv_writer.writerow(_metric_row(final_accy, avg_acc_final, [_tau_cell]))
+            csv_file.flush()
+            if _cal_res is not None:
+                logging.info(
+                    f"[FINAL] Task {task} | Round {round_idx+1}: Acc {final_accy['top1']:.2f}% | "
+                    f"f1_mac {float(final_accy.get('f1_macro', 0)):.2f} | "
+                    f"f1_wei {float(final_accy.get('f1_weighted', 0)):.2f} | tau*={_cal_res['tau']:+.2f}")
 
             # ── Đánh giá per-client (PerFL): personalized model vs global model ──
             eval_every = int(args.get("per_client_eval_every", 0))  # 0 = chỉ round cuối task
@@ -1499,10 +1533,10 @@ def _train_federated(args):
             if round_idx == args["num_rounds"] - 1:
                 cnn_curve["top1"].append(cnn_accy["top1"])
                 cnn_curve["top5"].append(cnn_accy["top5"])
-                history["cnn"]["acc"].append(cnn_accy["top1"])
-                history["cnn"]["precision"].append(cnn_accy.get("precision_macro", 0))
-                history["cnn"]["recall"].append(cnn_accy.get("recall_macro", 0))
-                history["cnn"]["f1"].append(cnn_accy.get("f1_macro", 0))
+                history["cnn"]["acc"].append(final_accy["top1"])
+                history["cnn"]["precision"].append(final_accy.get("precision_macro", 0))
+                history["cnn"]["recall"].append(final_accy.get("recall_macro", 0))
+                history["cnn"]["f1"].append(final_accy.get("f1_macro", 0))
                 
                 if nme_accy is not None:
                     nme_curve["top1"].append(nme_accy["top1"])
@@ -1668,6 +1702,7 @@ def _train_federated(args):
         global_model.after_task()
 
     csv_file.close()
+    raw_csv_file.close()
     per_client_file.close()
 
     # ── Vẽ biểu đồ ──────────────────────────────────────────────────────────

@@ -103,7 +103,7 @@ open(os.path.join(run, "CODE_COMMIT.txt"), "w").write(
     f"{BRANCH} @ {COMMIT}\nconfig {CONFIG_NAME}\nresume {RESUME_ARGS[1] if RESUME_ARGS else 'tu dau'}\n")
 rows = [r for r in csv.reader(open(os.path.join(run, "metrics_round_by_round.csv"), encoding="utf-8-sig"))
         if r and r[0] != "task" and len(r) >= 15]
-print("\nTASK (dem tu 0) | f1_mac round cuoi da chay | max | so round")
+print("\nKET QUA CUOI CUNG (metrics_round_by_round.csv, sau hieu chinh tau*)\nTASK (dem tu 0) | f1_mac round cuoi da chay | max | so round")
 for t in sorted({int(r[0]) for r in rows}):
     f1 = [float(r[12]) for r in rows if int(r[0]) == t]
     print(f"task {t}: f1_mac cuoi {f1[-1]:.2f} | max {max(f1):.2f} | {len(f1)} round")
