@@ -778,7 +778,7 @@ def _train_federated(args):
         return fh, wr
 
     csv_path = os.path.join(run_dir, "metrics_round_by_round.csv")
-    csv_file, csv_writer = _open_metric_csv(csv_path, _METRIC_HEADER + ["tau_star"])
+    csv_file, csv_writer = _open_metric_csv(csv_path, _METRIC_HEADER + ["tau_star", "model_round"])
     raw_csv_file, raw_csv_writer = _open_metric_csv(
         os.path.join(run_dir, "metrics_round_by_round_raw.csv"), _METRIC_HEADER)
     results_final = []
@@ -889,6 +889,7 @@ def _train_federated(args):
         else:
             raise FileNotFoundError(f"Memory checkpoint not found: {args['resume_memory']}")
 
+    _gate = {}   # quality_gated_update: mo hinh toan cuc tot nhat (theo F1 du lieu client) cua task
     for task in range(nb_tasks):
         # Save previous global network BEFORE expansion. AFSIC KD needs this old model.
         prev_global_network = copy.deepcopy(global_model._network) if _is_afsic(args) and task > 0 else None
@@ -1325,6 +1326,40 @@ def _train_federated(args):
                     global_weights = average_weights(client_weights)
                     global_model._network.load_state_dict(global_weights)
 
+            # ── Cap nhat toan cuc co kiem dinh (quality_gated_update, mac dinh TAT) ──
+            # Server chi CHAP NHAN mo hinh vua gop neu F1 macro tren DU LIEU CLIENT (so
+            # dem client da gui cho buoc chon tau*, khong dung tap test) khong giam so
+            # voi mo hinh tot nhat cua task; nguoc lai giu mo hinh do (trong so, bo nho
+            # prototype, so dem lop) va gui no xuong cho round sau. Round dau moi task
+            # luon chap nhan. quality_gate_eps: muc giam cho phep (mac dinh 0).
+            _pre_calib = None
+            if (args.get("quality_gated_update", False) and args.get("decision_calibration", False)
+                    and _is_afsic(args) and client_weights):
+                _pre_calib = _client_tau_selection(global_model, client_dms, args, task)
+                if _pre_calib is not None:
+                    if _gate.get("task") != task:
+                        _gate.clear()
+                        _gate.update(task=task, f1=-1.0)
+                    _eps = float(args.get("quality_gate_eps", 0.0) or 0.0)
+                    if _pre_calib["best"] >= _gate["f1"] - _eps:
+                        _gate.update(f1=_pre_calib["best"], round=round_idx + 1, pre=_pre_calib,
+                                     state=copy.deepcopy(global_model._network.state_dict()),
+                                     proto=copy.deepcopy(global_model.global_proto_memory),
+                                     prior=copy.deepcopy(getattr(global_model, "class_prior_counts", None)))
+                        logging.info(f"[GATE] Task {task} R{round_idx+1}: CHAP NHAN mo hinh moi | "
+                                     f"F1 du lieu client {_pre_calib['best']:.2f}")
+                    else:
+                        _new_f1 = _pre_calib["best"]
+                        global_model._network.load_state_dict(_gate["state"])
+                        global_model.global_proto_memory = copy.deepcopy(_gate["proto"])
+                        if _gate.get("prior") is not None:
+                            global_model.class_prior_counts = copy.deepcopy(_gate["prior"])
+                        for c in range(args["num_clients"]):
+                            local_models[c].global_proto_memory = copy.deepcopy(global_model.global_proto_memory)
+                        _pre_calib = _gate["pre"]
+                        logging.info(f"[GATE] Task {task} R{round_idx+1}: GIU mo hinh round {_gate['round']} | "
+                                     f"F1 du lieu client moi {_new_f1:.2f} < tot nhat {_gate['f1']:.2f}")
+
             # ── Đánh giá Global Model ──
             #
             # eval_every_n_rounds: 1 = moi round (MAC DINH, hanh vi cu).
@@ -1436,7 +1471,7 @@ def _train_federated(args):
             if (args.get("decision_calibration", False) and _is_afsic(args)
                     and (_last_round or (_ce > 0 and (round_idx + 1) % _ce == 0))):
                 _cal_res = _decision_calibration(global_model, client_dms, args, task, run_dir,
-                                                 round_idx=round_idx, full=_last_round)
+                                                 round_idx=round_idx, full=_last_round, pre=_pre_calib)
 
             def _metric_row(m, avg, extra=()):
                 return [
@@ -1468,7 +1503,8 @@ def _train_federated(args):
                 _tau_cell = ""
             results_final.append(final_accy)
             avg_acc_final = sum(r["top1"] for r in results_final) / len(results_final)
-            csv_writer.writerow(_metric_row(final_accy, avg_acc_final, [_tau_cell]))
+            csv_writer.writerow(_metric_row(final_accy, avg_acc_final,
+                                            [_tau_cell, _gate.get("round", "") if _gate.get("task") == task else ""]))
             csv_file.flush()
             if _cal_res is not None:
                 logging.info(
@@ -1805,21 +1841,10 @@ def _calib_loader_fewshot(data_manager, total_classes, batch_size, cap, seed,
     return make_loader(dataset, batch_size=batch_size, shuffle=False), scale
 
 
-def _decision_calibration(global_model, client_dms, args, task, run_dir, round_idx=None, full=True):
-    """Hieu chinh quyet dinh cuoi task (logit adjustment, Menon et al. ICLR 2021).
-
-    Du doan = argmax(logit + tau * log pi), pi = tan suat lop toan cuc (so mau
-    huan luyen that, server da co tu khau gop prototype). tau duoc CHON KHONG
-    DUNG TAP TEST: moi client tinh ma tran nham lan cua mo hinh toan cuc tren du
-    lieu cua chinh no cho tung tau trong luoi, chi GUI SO DEM len server; server
-    cong lai va chon tau cho F1 macro cao nhat. Sau do mot luot qua tap test cho
-    moi tau trong luoi (chi de bao cao; tau dung cho ket qua la tau da chon).
-    Khong doi mo hinh, khong doi qua trinh hoc.
-
-    Moi lan goi ghi MOT dong tom tat vao calibration_by_round.csv (de ve duong
-    cong theo round). full=True (round cuoi task) ghi them calibration.csv day du
-    moi tau va confusion_matrix_task_XX_calib.csv.
-    """
+def _client_tau_selection(global_model, client_dms, args, task):
+    """Phan hieu chinh CHI DUNG DU LIEU CLIENT: moi client dem ma tran nham lan cho
+    tung tau, server cong lai, chon tau* cho F1 macro cao nhat. Tra ve dict
+    {taus, calib_f1, best, tau_star, n_cl} hoac None. Khong dung tap test."""
     K = int(global_model._total_classes)
     taus = [float(t) for t in (args.get("calib_taus") or _CALIB_TAUS_DEFAULT)]
     if 0.0 not in taus:
@@ -1847,6 +1872,31 @@ def _decision_calibration(global_model, client_dms, args, task, run_dir, round_i
     calib_f1 = {t: _metrics_tu_cm(agg[t])["f1_macro"] for t in taus}
     best = max(calib_f1.values())
     tau_star = min((t for t in taus if calib_f1[t] == best), key=lambda t: (abs(t), t))
+    return {"taus": taus, "calib_f1": calib_f1, "best": best, "tau_star": tau_star, "n_cl": n_cl}
+
+
+def _decision_calibration(global_model, client_dms, args, task, run_dir, round_idx=None, full=True, pre=None):
+    """Hieu chinh quyet dinh cuoi task (logit adjustment, Menon et al. ICLR 2021).
+
+    Du doan = argmax(logit + tau * log pi), pi = tan suat lop toan cuc (so mau
+    huan luyen that, server da co tu khau gop prototype). tau duoc CHON KHONG
+    DUNG TAP TEST: moi client tinh ma tran nham lan cua mo hinh toan cuc tren du
+    lieu cua chinh no cho tung tau trong luoi, chi GUI SO DEM len server; server
+    cong lai va chon tau cho F1 macro cao nhat. Sau do mot luot qua tap test cho
+    moi tau trong luoi (chi de bao cao; tau dung cho ket qua la tau da chon).
+    Khong doi mo hinh, khong doi qua trinh hoc.
+
+    Moi lan goi ghi MOT dong tom tat vao calibration_by_round.csv (de ve duong
+    cong theo round). full=True (round cuoi task) ghi them calibration.csv day du
+    moi tau va confusion_matrix_task_XX_calib.csv.
+    """
+    K = int(global_model._total_classes)
+    if pre is None:
+        pre = _client_tau_selection(global_model, client_dms, args, task)
+    if pre is None:
+        return None
+    taus, calib_f1, best, tau_star, n_cl = (pre["taus"], pre["calib_f1"], pre["best"],
+                                            pre["tau_star"], pre["n_cl"])
 
     test_cms = _sweep_tau_one_pass(global_model, global_model.test_loader, K, taus, verbose=True)
     if not test_cms:
