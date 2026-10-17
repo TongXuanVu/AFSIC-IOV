@@ -1333,7 +1333,9 @@ def _train_federated(args):
             # prototype, so dem lop) va gui no xuong cho round sau. Round dau moi task
             # luon chap nhan. quality_gate_eps: muc giam cho phep (mac dinh 0).
             _pre_calib = None
+            # quality_gate_min_task: chi bat kiem dinh tu task (0-based) nay tro di (mac dinh 0).
             if (args.get("quality_gated_update", False) and args.get("decision_calibration", False)
+                    and task >= int(args.get("quality_gate_min_task", 0))
                     and _is_afsic(args) and client_weights):
                 _pre_calib = _client_tau_selection(global_model, client_dms, args, task)
                 if _pre_calib is not None:
@@ -1755,7 +1757,7 @@ _CALIB_TAUS_DEFAULT = [-3.0, -2.0, -1.5, -1.0, -0.6, -0.4, -0.3, -0.2, -0.15, -0
 
 
 def _calib_loader(data_manager, total_classes, batch_size, cap, seed,
-                  kshot=None, fewshot_seed=None, client_id=0):
+                  kshot=None, fewshot_seed=None, client_id=0, ratio_scale=False):
     """Du lieu HUAN LUYEN cua mot client (moi lop da hoc) de hieu chinh quyet dinh.
 
     Lay toi da `cap` mau MOI LOP (ngau nhien, co dinh theo seed) va tra ve he so
@@ -1773,7 +1775,7 @@ def _calib_loader(data_manager, total_classes, batch_size, cap, seed,
     from utils.data_manager import SubDummyDataset
     if kshot is not None:
         return _calib_loader_fewshot(data_manager, total_classes, batch_size, cap, seed,
-                                     kshot, fewshot_seed, client_id)
+                                     kshot, fewshot_seed, client_id, ratio_scale=ratio_scale)
     dataset = data_manager.get_dataset(np.arange(0, total_classes), source="train", mode="test")
     if len(dataset) == 0:
         return None, None
@@ -1797,8 +1799,15 @@ def _calib_loader(data_manager, total_classes, batch_size, cap, seed,
 
 
 def _calib_loader_fewshot(data_manager, total_classes, batch_size, cap, seed,
-                          kshot, fewshot_seed, client_id):
-    """Ban few-shot cua _calib_loader (xem chu thich o do)."""
+                          kshot, fewshot_seed, client_id, ratio_scale=False):
+    """Ban few-shot cua _calib_loader (xem chu thich o do).
+
+    ratio_scale (calib_fewshot_ratio_scale, mac dinh TAT): kich ban ti le (0 < kshot < 1,
+    vd 1%) -> moi mau co nhan cua lop task >= 1 dai dien cho 1/kshot mau that (theo dung
+    giao thuc), nen dem ma tran nham duoc nhan 1/kshot, giong cach lop task 0 duoc nhan
+    n_c/cap. Chi dung hang so cua giao thuc, khong dung so mau that cua tung lop.
+    Khong anh huong 10-shot (kshot >= 1) va full."""
+    _ratio = (1.0 / float(kshot)) if (ratio_scale and kshot is not None and 0 < float(kshot) < 1) else 1.0
     from utils.data_manager import SubDummyDataset
     y = np.asarray(data_manager._train_targets)
     incs = [int(v) for v in getattr(data_manager, "_increments", [])]
@@ -1832,6 +1841,7 @@ def _calib_loader_fewshot(data_manager, total_classes, batch_size, cap, seed,
                 k = _resolve_kshot(kshot, len(pos))
                 if k is not None:
                     pos = pos[rng.choice(len(pos), size=min(k, len(pos)), replace=False)]
+                scale[c] = _ratio
                 parts.append(np.sort(pos))
     if not parts:
         return None, None
@@ -1857,7 +1867,8 @@ def _client_tau_selection(global_model, client_dms, args, task):
                  if args.get("fewshot_enabled", False) and args.get("kshot", None) is not None else None)
         loader, scale = _calib_loader(client_dms[c], K, args["batch_size"], cap,
                                       seed=args.get("seed", 0) + 7919 * (task + 1) + c,
-                                      kshot=_fs_k, fewshot_seed=args.get("seed", 0), client_id=c)
+                                      kshot=_fs_k, fewshot_seed=args.get("seed", 0), client_id=c,
+                                      ratio_scale=bool(args.get("calib_fewshot_ratio_scale", False)))
         if loader is None:
             continue
         cms = _sweep_tau_one_pass(global_model, loader, K, taus, verbose=False)
