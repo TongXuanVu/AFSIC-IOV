@@ -59,17 +59,7 @@ Kịch bản ít mẫu được bật trong config: `fewshot_enabled = true` cù
 
 Trên Kaggle dùng `cell_exp.py`. Đặt `SCENARIO`, `LA_TAU`, `QUALITY_GATE`, `RATIO_SCALE`, `RESUME` ở đầu cell. Cell tự tạo config theo kịch bản, dừng trước giới hạn 12 giờ và nén kết quả cùng checkpoint cuối giai đoạn để chạy tiếp ở phiên sau.
 
-## Tái lập kết quả trong bài báo
-
-Kết quả được chạy qua nhiều phiên Kaggle, mỗi phiên chạy tiếp từ checkpoint cuối giai đoạn của phiên trước. Tag `ket-qua-bai-bao` trỏ tới commit đã tạo ra kết quả.
-
-| Phần | Kịch bản | Thiết lập | Chạy từ |
-|---|---|---|---|
-| Giai đoạn 1 (dùng chung) | đầy đủ | `LA_TAU = 1.0` | đầu |
-| Giai đoạn 2 đến 5 | đầy đủ, 10-shot | `LA_TAU = 0.5` | checkpoint sau giai đoạn 1 |
-| Giai đoạn 2 | 1% | `LA_TAU = 0.5` | checkpoint sau giai đoạn 1 |
-| Giai đoạn 3 đến 5 | 1% | `LA_TAU = 0.5`, `RATIO_SCALE = True` | checkpoint sau giai đoạn 2 |
-| Giai đoạn 5 | đầy đủ, 10-shot | `LA_TAU = 0.5`, `QUALITY_GATE = True` | checkpoint sau giai đoạn 4 |
+## Kết quả
 
 Kết quả trên CAN tại vòng 30 của giai đoạn cuối, mô hình toàn cục sau hiệu chỉnh quyết định (đơn vị %):
 
