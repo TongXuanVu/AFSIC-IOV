@@ -1,6 +1,9 @@
 import csv, glob, json, os, re, shutil, signal, subprocess, sys, time, zipfile
 
-# CELL CHAY MOT PHUONG AN (moi nhanh git = mot phuong an).
+# CELL KAGGLE CHAY AFSIC-IoV (nhanh main, config exp_logit_prior.json).
+#   LA_TAU = 1.0 cho giai doan 1, 0.5 cho cac giai doan tiem tien (xem README, muc tai lap ket qua).
+#   QUALITY_GATE = True -> cap nhat toan cuc co kiem dinh (quality_gated_update).
+#   RATIO_SCALE = True  -> kich ban 1%: nhan 1/kshot so dem lop tiem tien khi chon tau*.
 #   RESUME = None    -> chay TU DAU (task 1 tro di), CUNG mot cau hinh cho moi task.
 #   RESUME = "auto"  -> tu tim ckpt_taskXX_memory_client99.pth trong /kaggle/input
 #   RESUME = "ten_thu_muc" -> chi tim trong thu muc input do
@@ -9,22 +12,24 @@ import csv, glob, json, os, re, shutil, signal, subprocess, sys, time, zipfile
 #   EVAL_EVERY = 1   -> danh gia + hieu chinh MOI round (de ve do thi theo round)
 # Cell tu dung truoc gioi han 12 gio cua Kaggle (TIME_BUDGET_H), dong goi ket qua cac
 # task da xong va in ra file checkpoint de chay tiep.
-BRANCH = "exp/doi-chung"   # exp/doi-chung | exp/q-cai-thien | exp/fedrs | exp/fedlc | exp/logit-prior
+BRANCH = "main"
 SCENARIO = "full"          # "full" | "1percent" | "10shot"
+LA_TAU = 1.0               # 1.0 giai doan 1, 0.5 cac giai doan sau
+QUALITY_GATE = False
+RATIO_SCALE = False
 RESUME = None              # None | "auto" | ten thu muc trong /kaggle/input
 RESUME_TASK = None         # None = task cao nhat; 0 = checkpoint sau task 1
 EVAL_EVERY = 1             # 1 = moi round (do thi theo round); 5 = nhanh hon
 TIME_BUDGET_H = 11.3       # dung main.py sau ngan nay gio de con thoi gian dong goi
 
-CONFIGS = {"exp/doi-chung": "exp_doi_chung", "exp/q-cai-thien": "exp_q_cai_thien",
-           "exp/fedrs": "exp_fedrs", "exp/fedlc": "exp_fedlc", "exp/logit-prior": "exp_logit_prior"}
+BASE_NAME = "exp_logit_prior"
 REPO = "https://github.com/TongXuanVu/AFSIC-IOV.git"
 WORK = "/kaggle/working"
 CODE = os.path.join(WORK, "AFSIC-IOV")
 T_START = time.time()
-assert BRANCH in CONFIGS and SCENARIO in ("full", "1percent", "10shot")
-BASE_NAME = CONFIGS[BRANCH]
-CONFIG_NAME = f"{BASE_NAME}_{SCENARIO}"
+assert SCENARIO in ("full", "1percent", "10shot")
+CONFIG_NAME = (f"{BASE_NAME}_{SCENARIO}_la{str(LA_TAU).replace('.', '')}" + ("_gate" if QUALITY_GATE else "")
+               + ("_ratio" if RATIO_SCALE else ""))
 CONFIG = f"configs/exps/{CONFIG_NAME}.json"
 
 assert glob.glob("/kaggle/input/**/federated_data/client_*_task_*.pt", recursive=True) and \
@@ -62,6 +67,9 @@ if SCENARIO == "1percent":
 elif SCENARIO == "10shot":
     cfg.update(fewshot_enabled=True, kshot=10)
 cfg["eval_every_n_rounds"] = int(EVAL_EVERY)
+cfg["la_tau"] = float(LA_TAU)
+cfg["quality_gated_update"] = bool(QUALITY_GATE)
+cfg["calib_fewshot_ratio_scale"] = bool(RATIO_SCALE)
 cfg.pop("max_tasks", None)
 json.dump(cfg, open(CONFIG, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
@@ -74,7 +82,7 @@ _src = "".join(open(f, encoding="utf-8").read() for f in
                ("trainer.py", "models/afsic_ids.py", "utils/inc_net.py", "utils/aggregation.py"))
 assert int(cfg.get("calib_every_n_rounds", 0) or 0) == 1, "Code tren GitHub chua phai ban HC moi round - chua push?"
 for _f in ("_decision_calibration", "_calib_loader_fewshot", "log_client_recall", "single_shared_encoder",
-           "aggregate_encoder_only"):
+           "aggregate_encoder_only", "quality_gated_update", "calib_fewshot_ratio_scale"):
     assert _f in _src, f"Code chua co {_f} - sai nhanh?"
 print(f"[config] {CONFIG_NAME} | quality_mode={cfg.get('quality_mode', 'acc')} | "
       f"local_loss_mode={cfg.get('local_loss_mode', 'ce')} | class_weight_power={cfg.get('class_weight_power')} | "
@@ -100,7 +108,7 @@ runs = sorted(glob.glob("logs/afsic-iov_federated/can_iov/*_clients100"), key=os
 assert runs, "Khong thay thu muc log"
 run = runs[-1]
 open(os.path.join(run, "CODE_COMMIT.txt"), "w").write(
-    f"{BRANCH} @ {COMMIT}\nconfig {CONFIG_NAME}\nresume {RESUME_ARGS[1] if RESUME_ARGS else 'tu dau'}\n")
+    f"{BRANCH} @ {COMMIT}\nconfig {CONFIG_NAME} (la_tau={LA_TAU}, gate={QUALITY_GATE}, ratio_scale={RATIO_SCALE})\nresume {RESUME_ARGS[1] if RESUME_ARGS else 'tu dau'}\n")
 rows = [r for r in csv.reader(open(os.path.join(run, "metrics_round_by_round.csv"), encoding="utf-8-sig"))
         if r and r[0] != "task" and len(r) >= 15]
 print("\nKET QUA CUOI CUNG (metrics_round_by_round.csv, sau hieu chinh tau*)\nTASK (dem tu 0) | f1_mac round cuoi da chay | max | so round")
