@@ -10,7 +10,7 @@ def load_json(settings_path):
 
 def setup_parser():
     parser = argparse.ArgumentParser(description='Reproduce of multiple continual learning algorthms.')
-    parser.add_argument('--config', type=str, default='./configs/exps/can_iov_afsic.json',
+    parser.add_argument('--config', type=str, default='./configs/exps/exp_logit_prior.json',
                         help='Json file of settings.')
     parser.add_argument('--mode', type=str, default='train',
                         choices=['train', 'test'],
