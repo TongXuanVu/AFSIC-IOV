@@ -435,16 +435,36 @@ class AFSICIDSNet(nn.Module):
         class RawInputAdapter(nn.Module):
             """Dac ta 5.2: h_a = A_psi(x). MLP bottleneck NHO doc thang dau vao tho x
             (khong boc/sao chep encoder). Ten thuoc tinh `adapter` de khop bo loc
-            gop trong so (plasticity_adapter.adapter) va loss RS (L1 tren A_psi)."""
-            def __init__(self, in_dim, out_dim, bottleneck_dim):
+            gop trong so (plasticity_adapter.adapter) va loss RS (L1 tren A_psi).
+
+            personal_rank > 0 (cach 2, adapter chung + phan du rieng):
+                h_a = A_t(x) + dA_i(x)
+            A_t = `adapter` (server tong hop), dA_i = `delta` (MLP hang thap
+            in_dim -> r -> out_dim, giu tai client, KHONG tong hop). Lop cuoi cua
+            delta khoi tao 0 nen dA_i = 0 luc mo task; ban toan cuc khong bao gio
+            cap nhat delta nen mo hinh toan cuc chi con A_t."""
+            def __init__(self, in_dim, out_dim, bottleneck_dim, personal_rank=0):
                 super().__init__()
                 self.adapter = nn.Sequential(
                     nn.Linear(in_dim, bottleneck_dim),
                     nn.ReLU(inplace=True),
                     nn.Linear(bottleneck_dim, out_dim),
                 )
+                self.delta = None
+                if int(personal_rank) > 0:
+                    self.delta = nn.Sequential(
+                        nn.Linear(in_dim, int(personal_rank)),
+                        nn.ReLU(inplace=True),
+                        nn.Linear(int(personal_rank), out_dim),
+                    )
+                    nn.init.zeros_(self.delta[-1].weight)
+                    nn.init.zeros_(self.delta[-1].bias)
             def extract_vector(self, x):
-                return self.adapter(x.flatten(1) if x.dim() > 2 else x)
+                x = x.flatten(1) if x.dim() > 2 else x
+                h = self.adapter(x)
+                if self.delta is not None:
+                    h = h + self.delta(x)
+                return h
             def forward(self, x):
                 return {"features": self.extract_vector(x)}
 
@@ -475,7 +495,8 @@ class AFSICIDSNet(nn.Module):
         else:
             if _adapter_input == "raw":
                 self.plasticity_adapter = RawInputAdapter(
-                    int(self.args.get("adapter_input_dim", 31)), _src_dim, bottleneck_dim)
+                    int(self.args.get("adapter_input_dim", 31)), _src_dim, bottleneck_dim,
+                    personal_rank=int(self.args.get("personal_residual_rank", 0) or 0))
             else:
                 self.plasticity_adapter = BottleneckFeatureAdapter(
                     _source, _src_dim, bottleneck_dim, plastic=_plastic)
@@ -519,9 +540,10 @@ class AFSICIDSNet(nn.Module):
 
         logging.info(
             "[NET] transition: stability_dim=%d + plasticity_dim=%d -> feature_dim=%d "
-            "(expand_feature_space=%s, bottleneck=%d)",
+            "(expand_feature_space=%s, bottleneck=%d, personal_residual_rank=%d, long_nhanh=%s)",
             self._stability_dim, _src_dim if _expand else 0, self.feature_dim,
-            _expand, bottleneck_dim)
+            _expand, bottleneck_dim, int(self.args.get("personal_residual_rank", 0) or 0),
+            type(self.stability_encoder).__name__)
         self.to(self._device)
 
     def init_old_class_new_block_from_prototypes(self, prototypes, class_ids):

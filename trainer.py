@@ -691,8 +691,19 @@ def _load_global_into_client(local_model, global_state, task, args, stage_init=F
         _markers = _PERSONALIZED_KEY_MARKERS
         if args.get("shared_encoder_trainable", False):
             _markers = tuple(m for m in _markers if m != "stability_encoder")
+        if int(args.get("personal_residual_rank", 0) or 0) > 0:
+            # Cach 2 (adapter chung + phan du rieng): adapter A_t, encoder da long va
+            # fc nap tu global moi round; chi phan du dA_i va gate cua stage hien tai
+            # (neu personal_gate) la cua rieng client.
+            def _is_personal(k):
+                if "plasticity_adapter.delta" in k:
+                    return True
+                return bool(args.get("personal_gate", False)) and k.startswith("gate.")
+        else:
+            def _is_personal(k):
+                return any(m in k for m in _markers)
         for k in own_state.keys():
-            if k in global_state and not any(m in k for m in _markers):
+            if k in global_state and not _is_personal(k):
                 own_state[k] = global_state[k]
         local_model._network.load_state_dict(own_state)
     else:
@@ -1290,7 +1301,8 @@ def _train_federated(args):
                         if not is_aggregated_state_key(k, task, aggregate_backbone,
                                        args.get("plastic_source_trainable", False),
                                        args.get("shared_encoder_trainable", False),
-                                       bool(args.get("aggregate_encoder_only", False))):
+                                       bool(args.get("aggregate_encoder_only", False)),
+                                       bool(args.get("personal_gate", False))):
                             continue
                         # num_batches_tracked: trung bình có trọng số của một bộ
                         # đếm là vô nghĩa; lấy max cho đúng ngữ nghĩa "đã thấy
@@ -1430,7 +1442,16 @@ def _train_federated(args):
                            if p.requires_grad and "stability_encoder" in n_)
                 _D = int(global_model._network.feature_dim)
                 comm_cost = (_enc + global_model._total_classes * (_D + 3)) * 4 / (1024 * 1024)
-            
+            elif int(args.get("personal_residual_rank", 0) or 0) > 0 and task > 0:
+                # Cach 2: client gui adapter chung A_t (+ fc neu duoc gop) va prototype;
+                # phan du dA_i, gate rieng va encoder da long dong bang khong gui.
+                _up = sum(p.numel() for n_, p in global_model._network.named_parameters()
+                          if p.requires_grad and is_aggregated_state_key(
+                              n_, task, False, False, False, False,
+                              bool(args.get("personal_gate", False))))
+                _D = int(global_model._network.feature_dim)
+                comm_cost = (_up + global_model._total_classes * (_D + 3)) * 4 / (1024 * 1024)
+
             # Forgetting theo đúng ranh giới task (dùng task_increments thay vì
             # group keys 10 lớp cố định vốn không khớp với increments lệch nhau)
             y_top1 = y_pred[:, 0] if y_pred.ndim > 1 else y_pred.flatten()

@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 
 def is_aggregated_state_key(key, task, aggregate_backbone=False, plastic_source=False,
-                            shared_encoder=False, encoder_only=False):
+                            shared_encoder=False, encoder_only=False, personal_gate=False):
     # Lưu ý PerFL (personalized_adapter): server VẪN aggregate adapter/gate để
     # global model có nhánh plasticity ý nghĩa khi đánh giá; tính cá nhân hóa
     # nằm ở phía client — client KHÔNG nạp đè adapter/gate cục bộ của mình
@@ -19,6 +19,14 @@ def is_aggregated_state_key(key, task, aggregate_backbone=False, plastic_source=
     # Dac ta 5.1: encoder dung chung duoc huan luyen o moi stage -> gop Delta theta.
     if shared_encoder and "stability_encoder" in key:
         return True
+    # personal_gate (cach 2): gate cua stage hien tai la cua RIENG client, server
+    # khong tong hop -> gate cua mo hinh toan cuc giu trang thai khoi tao (g = 0,5).
+    # Gate da long vao stability_encoder (stage truoc) van la ban toan cuc.
+    if personal_gate and key.startswith("gate."):
+        return False
+    # Phan du rieng dA_i cua adapter (plasticity_adapter.delta) khong bao gio tong hop.
+    if "plasticity_adapter.delta" in key:
+        return False
     if "plasticity_adapter.frozen_source" in key:
         # Khi plastic_source_trainable=True, frozen_source la mot backbone DUOC
         # HUAN LUYEN -> bat buoc phai gop, neu khong moi client giu rieng mot ban
@@ -119,7 +127,8 @@ def compute_aggregation_weights(
 
     def _is_measured(key, tensor):
         if not is_aggregated_state_key(key, task, agg_bb, plastic_src, shared_enc,
-                                       bool(args.get("aggregate_encoder_only", False))):
+                                       bool(args.get("aggregate_encoder_only", False)),
+                                       bool(args.get("personal_gate", False))):
             return False
         if legacy:
             return True
