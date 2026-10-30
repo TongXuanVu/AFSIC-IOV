@@ -1081,6 +1081,7 @@ def _train_federated(args):
             client_steps = {}
             
             global_state_round_start = copy.deepcopy(global_model._network.state_dict())
+            client_gain = {}   # beta_class_gain: {client: recall tung lop client vs toan cuc}
             
             for c in range(args["num_clients"]):
                 if local_models[c].train_loader is None: 
@@ -1184,6 +1185,10 @@ def _train_federated(args):
                     for _cid, _info in protos.items():
                         _info["q_class"] = _q_class.get(int(_cid), 0.0)
                     client_protos.append(protos)
+                    if float(args.get("beta_class_gain", 0.0) or 0.0) > 0:
+                        _cg = _class_gain_stats(global_model, local_models[c], client_dms[c], c, args, task)
+                        if _cg is not None:
+                            client_gain[c] = _cg
                 else:
                     client_accs.append(0.0)
                     client_protos.append({})
@@ -1207,7 +1212,8 @@ def _train_federated(args):
                         client_weights=client_weights,
                         global_state_round_start=global_state_round_start,
                         active_client_indices=active_client_indices,
-                        task=task
+                        task=task,
+                        client_gain=client_gain,
                     )
 
                     if client_steps and "tau_local" in agg_stats:
@@ -1851,6 +1857,43 @@ def _calib_loader_fewshot(data_manager, total_classes, batch_size, cap, seed,
     return make_loader(dataset, batch_size=batch_size, shuffle=False), scale
 
 
+def _class_gain_stats(global_model, local_model, data_manager, c, args, task):
+    """Do dong gop TUNG LOP cua client c cho trong so tong hop (beta_class_gain > 0).
+
+    Tren CUNG mot tap du lieu cua client (lay mau toi da class_gain_max_per_class moi lop,
+    kich ban few-shot chi dung dung cac mau k-shot co nhan, giong buoc hieu chinh tau*),
+    do recall tung lop cua (a) mo hinh client vua huan luyen va (b) mo hinh toan cuc client
+    vua nhan o dau round, ca hai doc ket qua bang argmax(logit + tau* log pi) voi tau* cua
+    round truoc. Khong dung tap test. Tra ve dict {rec_l, rec_g, n} (mang K phan tu) hoac None.
+    """
+    import types
+    K = int(global_model._total_classes)
+    ref = getattr(global_model, "_class_gain_ref", None)
+    tau = float(ref["tau"]) if (ref and ref.get("task") == int(task) and ref.get("K") == K) else 0.0
+    cap = args.get("class_gain_max_per_class", 5000)
+    _fs_k = (args.get("kshot", None)
+             if args.get("fewshot_enabled", False) and args.get("kshot", None) is not None else None)
+    loader, scale = _calib_loader(data_manager, K, args["batch_size"], cap,
+                                  seed=args.get("seed", 0) + 104729 * (task + 1) + c,
+                                  kshot=_fs_k, fewshot_seed=args.get("seed", 0), client_id=c,
+                                  ratio_scale=False)
+    if loader is None:
+        return None
+    _local = types.SimpleNamespace(_class_prior_counts=global_model._class_prior_counts,
+                                   _device=global_model._device, _network=local_model._network)
+    cm_l = _sweep_tau_one_pass(_local, loader, K, [tau], verbose=False)
+    cm_g = _sweep_tau_one_pass(global_model, loader, K, [tau], verbose=False)
+    if not cm_l or not cm_g:
+        return None
+    cm_l = np.asarray(cm_l[float(tau)], dtype=np.float64)
+    cm_g = np.asarray(cm_g[float(tau)], dtype=np.float64)
+    sup = cm_l.sum(axis=1)
+    rec_l = np.divide(np.diag(cm_l), sup, out=np.zeros(K), where=sup > 0)
+    rec_g = np.divide(np.diag(cm_g), sup, out=np.zeros(K), where=sup > 0)
+    n = sup * (np.asarray(scale, dtype=np.float64) if scale is not None else 1.0)
+    return {"rec_l": rec_l, "rec_g": rec_g, "n": n, "tau": tau}
+
+
 def _client_tau_selection(global_model, client_dms, args, task):
     """Phan hieu chinh CHI DUNG DU LIEU CLIENT: moi client dem ma tran nham lan cho
     tung tau, server cong lai, chon tau* cho F1 macro cao nhat. Tra ve dict
@@ -1883,6 +1926,17 @@ def _client_tau_selection(global_model, client_dms, args, task):
     calib_f1 = {t: _metrics_tu_cm(agg[t])["f1_macro"] for t in taus}
     best = max(calib_f1.values())
     tau_star = min((t for t in taus if calib_f1[t] == best), key=lambda t: (abs(t), t))
+    # Trong so tong hop theo dong gop tung lop (beta_class_gain): ghi lai F1 TUNG LOP cua
+    # mo hinh toan cuc tren du lieu client (tong so dem tai tau*, khong dung tap test) va
+    # tau* de round sau dung. Chi luu tru, khong doi hanh vi khi beta_class_gain = 0.
+    try:
+        _m = _metrics_tu_cm(agg[tau_star])
+        global_model._class_gain_ref = {
+            "task": int(task), "K": K, "tau": float(tau_star),
+            "f1": [float(v) / 100.0 for v in _m["_f1_per_class"]],
+        }
+    except Exception as e:
+        logging.warning(f"[CLASS-GAIN] khong luu duoc F1 tung lop: {e}")
     return {"taus": taus, "calib_f1": calib_f1, "best": best, "tau_star": tau_star, "n_cl": n_cl}
 
 

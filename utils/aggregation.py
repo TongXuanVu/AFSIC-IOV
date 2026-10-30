@@ -35,7 +35,8 @@ def compute_aggregation_weights(
     client_weights,
     global_state_round_start,
     active_client_indices,
-    task
+    task,
+    client_gain=None,
 ):
     Q_list = []
     drift_list = []
@@ -172,6 +173,44 @@ def compute_aggregation_weights(
     else:                       # "raw"
         size_cache = dict(log_n)
 
+    # ── Dong gop theo lop (beta_class_gain, mac dinh 0 = hanh vi cu) ─────────
+    # Y tuong lay tu WTO cua HFIN (Mao et al., 2024, Eq. 7) nhung ap len MO HINH thay vi
+    # du lieu: lop k ma mo hinh toan cuc dang yeu (F1 thap tren du lieu client, tai tau*)
+    # co he so u_k = clip(F1* / F1_k, 1, cap); client i duoc cong diem neu mo hinh cua no
+    # nhan ra lop k tot hon mo hinh toan cuc tren CUNG du lieu cua client:
+    #     W_i = sum_k u_k * (rec_local_ik - rec_global_ik) * n_ik^beta
+    # (giu ca gia tri am: client lam hong mot lop bi tru diem). W duoc chuan hoa min-max ve
+    # [0,1] giua cac client active roi cong vao Q_i voi he so beta_class_gain.
+    beta_cg = float(args.get("beta_class_gain", 0.0) or 0.0)
+    cg_norm = {}
+    if beta_cg > 0 and client_gain:
+        K = int(global_model._total_classes)
+        f1_star = float(args.get("class_gain_f1_star", 0.95))
+        u_cap = float(args.get("class_gain_cap", 20.0))
+        n_beta = float(args.get("class_gain_n_beta", 0.0))
+        ref = getattr(global_model, "_class_gain_ref", None)
+        ref_f1 = list(ref["f1"]) if ref else []
+        u = np.full(K, u_cap, dtype=np.float64)          # lop chua co F1 (lop moi) = server chua hoc
+        for k in range(min(K, len(ref_f1))):
+            u[k] = min(max(f1_star / max(float(ref_f1[k]), 1e-6), 1.0), u_cap)
+        W = {}
+        for c in active_client_indices:
+            g = client_gain.get(c)
+            if g is None:
+                continue
+            has = np.asarray(g["n"]) > 0
+            d = (np.asarray(g["rec_l"]) - np.asarray(g["rec_g"])) * has
+            w_n = np.power(np.maximum(np.asarray(g["n"], dtype=np.float64), 1.0), n_beta) if n_beta else 1.0
+            W[c] = float(np.sum(u * d * w_n))
+        if W:
+            lo, hi = min(W.values()), max(W.values())
+            cg_norm = {c: ((W[c] - lo) / (hi - lo) if hi > lo else 0.0) for c in W}
+            top = sorted(W, key=W.get, reverse=True)[:5]
+            logging.info(
+                "[CLASS-GAIN] u_k = {} | W min {:.3f} max {:.3f} | top: {}".format(
+                    [round(float(v), 2) for v in u], lo, hi,
+                    ", ".join(f"c{c}:{W[c]:.3f}" for c in top)))
+
     for c_idx, c in enumerate(active_client_indices):
         acc_i = client_accs[c]
         
@@ -213,6 +252,8 @@ def compute_aggregation_weights(
         size_term = beta_n * size_cache[c]
 
         Q_i = size_term + beta_acc * acc_i + beta_proto * proto_cons_i + beta_novelty * novelty_i - beta_drift * drift_i - beta_update * update_norm_i
+        cg_term = beta_cg * cg_norm.get(c, 0.0)
+        Q_i += cg_term
         Q_list.append(Q_i)
         drift_list.append(drift_i)
         update_norm_list.append(update_norm_i)
@@ -221,6 +262,7 @@ def compute_aggregation_weights(
             f"Client {c} => Q_i: {Q_i:.4f} | n_i: {n_i} | Acc: {acc_i*100:.2f}% | "
             f"ProtoCons: {proto_cons_i:.4f} | Novelty: {novelty_i:.4f} | "
             f"Drift: {drift_i:.4f} | UpdateNorm: {update_norm_i:.4f}"
+            + (f" | ClassGain: {cg_term:.4f}" if beta_cg > 0 else "")
         )
     
     accepted_positions = list(range(len(Q_list)))
