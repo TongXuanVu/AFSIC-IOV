@@ -682,8 +682,11 @@ def _load_global_into_client(local_model, global_state, task, args, stage_init=F
     client: adapter, gate, và stability_encoder (vốn được hợp nhất từ adapter
     cá nhân hóa của các task trước nên cũng khác nhau giữa các client).
     """
+    # personal_nesting: KHONG BAO GIO nap de chuoi rieng/phan du/gate rieng, ke ca luc mo task
+    # (nhanh moi cua client da duoc khoi tao dong nhat: dA cuoi = 0, gate = g0).
+    _pn = bool(args.get("personal_nesting", False)) and any(k.startswith("personal_stability.") for k in global_state)
     if (task > 0 and args.get("personalized_adapter", False)
-            and not (stage_init and args.get("personalized_init_from_global", False))):
+            and (_pn or not (stage_init and args.get("personalized_init_from_global", False)))):
         own_state = local_model._network.state_dict()
         # Dac ta 5.1: khi encoder dung chung duoc huan luyen (server gop Delta theta),
         # client phai NAP encoder toan cuc moi round; chi adapter/gate la ca nhan hoa.
@@ -696,7 +699,7 @@ def _load_global_into_client(local_model, global_state, task, args, stage_init=F
             # fc nap tu global moi round; chi phan du dA_i va gate cua stage hien tai
             # (neu personal_gate) la cua rieng client.
             def _is_personal(k):
-                if "plasticity_adapter.delta" in k:
+                if "plasticity_adapter.delta" in k or k.startswith("personal_stability."):
                     return True
                 return bool(args.get("personal_gate", False)) and k.startswith("gate.")
         else:
@@ -910,6 +913,15 @@ def _train_federated(args):
         if (prev_global_network is not None and args.get("cosine_sigma") is not None
                 and getattr(prev_global_network.fc, "sigma", None) is not None):
             prev_global_network.fc.sigma.data.fill_(float(args["cosine_sigma"]))
+
+        # personal_nesting: TRUOC khi long nhanh cua task truoc, moi client nap phan CHUNG
+        # cuoi cung (A_{t-1} da tong hop, chuoi chung, fc) tu server, giu nguyen phan rieng
+        # (dA_i, gate rieng, chuoi rieng), de chuoi rieng long dung A_{t-1} toan cuc.
+        if task > 0 and bool(args.get("personal_nesting", False)) and _is_afsic(args):
+            _gs = global_model._network.state_dict()
+            for c in range(args["num_clients"]):
+                _load_global_into_client(local_models[c], _gs, task - 1, args)
+            logging.info(f"[NET] personal_nesting: dong bo phan chung task {task - 1} vao {args['num_clients']} client truoc khi long nhanh")
 
         # 1. Mở rộng kiến trúc (nhưng không train) để lấy đúng kích thước mô hình
         global_model.incremental_train(client_dms[0], skip_train=True)

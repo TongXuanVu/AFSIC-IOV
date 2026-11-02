@@ -404,7 +404,7 @@ class AFSIC_IDS(BaseLearner):
             )
 
     def compute_local_prototypes(self, data_manager, class_ids=None, max_samples_per_class=None, seed=0,
-                                 report_full_count=False, with_stats=False):
+                                 report_full_count=False, with_stats=False, dual=False):
         """Tính prototype dạng streaming 1 lượt — không giữ ma trận feature trong RAM.
 
         Tương đương chính xác với bản cũ về mặt toán học: với m = mean(feature
@@ -412,6 +412,11 @@ class AFSIC_IDS(BaseLearner):
         dispersion = mean(1 − cos(f, prototype)) = 1 − ||m||.
         """
         local_protos = {}
+        # dual (personal_nesting): cung mot luot du lieu tinh HAI prototype — duong rieng z_i
+        # (giu tai client, dung cho prototype ca nhan hoa) va duong chung z_G (gui len server).
+        # Tra ve (protos_rieng, protos_chung).
+        local_protos_g = {}
+        dual = bool(dual) and hasattr(self._network, "extract_vector_global")
         self._network.eval()
 
         # Compute prototypes for selected active classes.
@@ -474,6 +479,7 @@ class AFSIC_IDS(BaseLearner):
 
             loader = make_loader(dset, batch_size=self.args["batch_size"], shuffle=False)
             feat_sum = None
+            feat_sum_g = None
             # Phuong an C (CCVR): them MOMEN BAC HAI sum(z z^T) cua dac trung da
             # chuan hoa, de server dung lai trung binh + hiep phuong sai tung lop.
             # Chi tinh khi goi voi with_stats=True (D x D, D=64..320 -> re).
@@ -481,10 +487,15 @@ class AFSIC_IDS(BaseLearner):
             feat_sq = None
             with torch.no_grad():
                 for _, inputs, _ in loader:
-                    feats = self._network.extract_vector(inputs.to(self._device))
+                    _inp = inputs.to(self._device)
+                    feats = self._network.extract_vector(_inp)
                     feats = F.normalize(feats, p=2, dim=1)
                     part = feats.sum(dim=0).double().cpu()
                     feat_sum = part if feat_sum is None else feat_sum + part
+                    if dual:
+                        fg = F.normalize(self._network.extract_vector_global(_inp), p=2, dim=1)
+                        pg = fg.sum(dim=0).double().cpu()
+                        feat_sum_g = pg if feat_sum_g is None else feat_sum_g + pg
                     if _want_sq:
                         _f = feats.double()
                         sq = (_f.t() @ _f).cpu()
@@ -507,6 +518,16 @@ class AFSIC_IDS(BaseLearner):
                 local_protos[class_idx]["stat_n"] = int(n_used)
                 local_protos[class_idx]["stat_sum"] = feat_sum.clone()
                 local_protos[class_idx]["stat_sq"] = feat_sq.float()
+            if dual and feat_sum_g is not None:
+                mg = feat_sum_g / n_used
+                ng = float(torch.norm(mg, p=2))
+                local_protos_g[class_idx] = {
+                    "prototype": (mg / (ng + 1e-8)).float(),
+                    "count": count,
+                    "dispersion": max(0.0, 1.0 - ng),
+                }
+        if dual:
+            return local_protos, local_protos_g
         return local_protos
 
 

@@ -115,20 +115,30 @@ class AFSICIDSNet(nn.Module):
         self.stability_encoder = None
         self.plasticity_adapter = None
         self.gate = None
+        # personal_nesting (huong 3, hai duong song song; mac dinh false = hanh vi cu):
+        #   duong CHUNG  z_G = Fuse(... Fuse(phi0, A_1; g0) ..., A_t; g0)   (giong moi client va server)
+        #   duong RIENG  z_i = Fuse(... Fuse(phi0, A_1 + dA_i1; g_i1) ..., A_t + dA_it; g_it)
+        # stability_encoder = chuoi CHUNG da long (A_k toan cuc, gate o trang thai khoi tao g0);
+        # personal_stability = chuoi RIENG da long (A_k toan cuc + dA_ik + gate rieng g_ik), chi o client.
+        self.personal_stability = None
+        self._personal_nesting = bool(args.get("personal_nesting", False))
         self._device = args["device"][0]
 
     def extract_vector(self, x):
         if self.stability_encoder is None:
             return _feat(self.convnet, x)
 
+        _stab = self.stability_encoder
+        if self._personal_nesting and self.personal_stability is not None:
+            _stab = self.personal_stability
         if self._shared_trainable:
             # Encoder dung chung duoc huan luyen: giu graph, che do train/eval
             # theo net.train()/net.eval().
-            phi_x = _feat(self.stability_encoder, x)
+            phi_x = _feat(_stab, x)
         else:
-            self.stability_encoder.eval()
+            _stab.eval()
             with torch.no_grad():
-                phi_x = _feat(self.stability_encoder, x)
+                phi_x = _feat(_stab, x)
 
         a_x = _feat(self.plasticity_adapter, x)
         g = self.gate(phi_x, a_x)
@@ -161,6 +171,30 @@ class AFSICIDSNet(nn.Module):
             z = F.normalize(z, p=2, dim=1)
         return z
 
+    def global_gate_value(self):
+        """Gia tri gate cua mo hinh toan cuc: gate o trang thai khoi tao (trong so 0,
+        bias = gate_init_bias) cho g = sigmoid(gate_init_bias) o moi chieu."""
+        return float(torch.sigmoid(torch.tensor(float(self.args.get("gate_init_bias", 0.0)))))
+
+    def extract_vector_global(self, x):
+        """Duong CHUNG z_G (huong 3): chuoi chung da long + adapter chung A_t (khong co
+        phan du rieng dA_i) + gate toan cuc g0. Trung voi extract_vector cua mo hinh
+        toan cuc o server. Client dung de tinh prototype GUI LEN server."""
+        if self.stability_encoder is None or self.plasticity_adapter is None:
+            return self.extract_vector(x)
+        self.stability_encoder.eval()
+        with torch.no_grad():
+            phi_x = _feat(self.stability_encoder, x)
+        _ad = self.plasticity_adapter
+        xa = x.flatten(1) if x.dim() > 2 else x
+        # Adapter doc du lieu tho (RawInputAdapter): chi lay phan chung A_t, bo dA_i.
+        a_x = _ad.adapter(xa)
+        g = self.global_gate_value()
+        z = g * phi_x + (1.0 - g) * a_x
+        if self.args.get("gated_fusion_norm", False):
+            z = F.normalize(z, p=2, dim=1)
+        return z
+
     def forward(self, x):
         z = self.extract_vector(x)
         out = self.fc(z)
@@ -168,6 +202,10 @@ class AFSICIDSNet(nn.Module):
         return out
 
     def freeze_stability_encoder(self):
+        if self.personal_stability is not None:
+            for p in self.personal_stability.parameters():
+                p.requires_grad = False
+            self.personal_stability.eval()
         if self._shared_trainable:
             return   # 5.1: encoder dung chung duoc huan luyen va gop o moi stage
         if self.stability_encoder is not None:
@@ -369,8 +407,33 @@ class AFSICIDSNet(nn.Module):
                 raise ValueError("single_shared_encoder khong dung chung voi expand_feature_space")
             self._stability_dim = self.base_dim
         else:
+            if self._personal_nesting:
+                if _expand:
+                    raise ValueError("personal_nesting khong dung chung voi expand_feature_space")
+                if str(self.args.get("adapter_input", "features")).lower() != "raw":
+                    raise ValueError("personal_nesting can adapter_input=raw")
+                if not bool(self.args.get("adapter_identity_init", False)):
+                    raise ValueError("personal_nesting can adapter_identity_init=true (gate toan cuc = g0)")
+                # Chuoi RIENG: long nhanh cua CHINH client (A_t toan cuc + dA_i + gate rieng).
+                _old_personal = self.personal_stability if self.personal_stability is not None \
+                    else self.stability_encoder
+                self.personal_stability = FusedFeatureExtractor(
+                    _old_personal, self.plasticity_adapter, self.gate, False,
+                    fusion_norm=bool(self.args.get("gated_fusion_norm", False)))
+                # Chuoi CHUNG: long A_t voi phan du dA bang 0 va gate o trang thai khoi tao,
+                # dung y het cach server long (server co dA = 0, gate khoi tao).
+                _gp = copy.deepcopy(self.plasticity_adapter)
+                if getattr(_gp, "delta", None) is not None:
+                    nn.init.zeros_(_gp.delta[-1].weight)
+                    nn.init.zeros_(_gp.delta[-1].bias)
+                _gg = copy.deepcopy(self.gate)
+                nn.init.zeros_(_gg.gate[0].weight)
+                nn.init.constant_(_gg.gate[0].bias, float(self.args.get("gate_init_bias", 0.0)))
+                _src_plastic, _src_gate = _gp, _gg
+            else:
+                _src_plastic, _src_gate = self.plasticity_adapter, self.gate
             self.stability_encoder = FusedFeatureExtractor(
-                self.stability_encoder, self.plasticity_adapter, self.gate, _expand,
+                self.stability_encoder, _src_plastic, _src_gate, _expand,
                 block_norm=self._block_norm,
                 num_blocks_prev=max(1, int(self._num_blocks) - 1),
                 block_gamma=self._block_gamma,
@@ -540,10 +603,11 @@ class AFSICIDSNet(nn.Module):
 
         logging.info(
             "[NET] transition: stability_dim=%d + plasticity_dim=%d -> feature_dim=%d "
-            "(expand_feature_space=%s, bottleneck=%d, personal_residual_rank=%d, long_nhanh=%s)",
+            "(expand_feature_space=%s, bottleneck=%d, personal_residual_rank=%d, long_nhanh=%s, "
+            "chuoi_rieng=%s)",
             self._stability_dim, _src_dim if _expand else 0, self.feature_dim,
             _expand, bottleneck_dim, int(self.args.get("personal_residual_rank", 0) or 0),
-            type(self.stability_encoder).__name__)
+            type(self.stability_encoder).__name__, type(self.personal_stability).__name__)
         self.to(self._device)
 
     def init_old_class_new_block_from_prototypes(self, prototypes, class_ids):

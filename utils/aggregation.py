@@ -27,6 +27,9 @@ def is_aggregated_state_key(key, task, aggregate_backbone=False, plastic_source=
     # Phan du rieng dA_i cua adapter (plasticity_adapter.delta) khong bao gio tong hop.
     if "plasticity_adapter.delta" in key:
         return False
+    # personal_nesting: chuoi RIENG da long cua client khong bao gio tong hop.
+    if key.startswith("personal_stability."):
+        return False
     if "plasticity_adapter.frozen_source" in key:
         # Khi plastic_source_trainable=True, frozen_source la mot backbone DUOC
         # HUAN LUYEN -> bat buoc phai gop, neu khong moi client giu rieng mot ban

@@ -35,17 +35,23 @@ class AFSIC_IoV(AFSIC_IDS):
 
     def compute_local_prototypes(self, data_manager, class_ids=None, max_samples_per_class=None, seed=0,
                                  report_full_count=False):
-        protos = super().compute_local_prototypes(
+        # personal_nesting (huong 3): prototype ca nhan hoa tinh tren duong RIENG z_i (giu
+        # tai client), prototype GUI LEN server tinh tren duong CHUNG z_G — cung khong gian
+        # voi mo hinh toan cuc, nen server lay trung binh dung. Mot luot du lieu cho ca hai.
+        _dual = (bool(self.args.get("personal_nesting", False))
+                 and getattr(self._network, "stability_encoder", None) is not None)
+        out = super().compute_local_prototypes(
             data_manager, class_ids=class_ids,
             max_samples_per_class=max_samples_per_class, seed=seed,
-            report_full_count=report_full_count,
+            report_full_count=report_full_count, dual=_dual,
         )
+        protos, sent = (out if _dual else (out, out))
         # Khong giu momen bac hai (CCVR) trong bo nho lau dai cua client:
         # chi can cho server trong round hien tai.
         self.local_protos.update({
             k: {kk: vv for kk, vv in v.items() if not kk.startswith("stat_")}
             for k, v in protos.items()})
-        return protos
+        return sent
 
     def _personalization_rho(self, class_id):
         """Trọng số trộn giữa prototype cục bộ và prototype toàn cục.
